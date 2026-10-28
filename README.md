@@ -4,6 +4,17 @@ Jarvis is a voice assistant inspired by J.A.R.V.I.S. from *Iron Man*. Talk to it
 
 Your speech is transcribed locally using the 0.6B **Underdog Bark 3.0** model. Jarvis uses **Dots3-Note Preview** for answers and **Fish Audio S2.1 Pro Free** for speech through OpenRouter.
 
+## Quick start on Windows
+
+1. Create an account or sign in at [OpenRouter](https://openrouter.ai/).
+2. Open [API Keys](https://openrouter.ai/settings/keys), select **Create Key**, name it `Jarvis`, and copy the key. Keep it private.
+3. On this GitHub page, select **Code → Download ZIP**, then extract the ZIP file.
+4. Open the extracted folder and double-click **Jarvis.cmd**. The first setup downloads the speech model and can take a while.
+5. When prompted, paste your OpenRouter key and select **Prepare Jarvis**. Keep the command window open while the model loads; your default browser will open when it is ready.
+6. Select **Start Jarvis**, choose **Entire Screen** when asked to share, and allow microphone access.
+
+For macOS and Linux, see [Start Jarvis](#3-start-jarvis) below. More detailed instructions and troubleshooting are also below.
+
 ## Before you begin
 
 You need:
