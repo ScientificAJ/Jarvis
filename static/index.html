@@ -38,6 +38,11 @@
         <button class="control" id="interrupt-button" type="button" hidden>Stop response</button>
       </section>
 
+      <section class="transcript-card" id="transcript-card" hidden aria-label="Live speech transcript">
+        <div class="section-heading"><span id="transcript-label">LIVE TRANSCRIPT</span><button class="text-button" id="finish-speech-button" type="button">Send speech now</button></div>
+        <p id="live-transcript" aria-live="polite"></p>
+      </section>
+
       <section class="screen-card" id="screen-card" hidden aria-label="Live screen preview">
         <div class="section-heading"><span><span class="live-dot"></span> SHARED SCREEN</span><span>LIVE</span></div>
         <video id="screen-preview" autoplay muted playsinline></video>
@@ -66,8 +71,8 @@
       <label for="profile">Personal preferences <span>optional</span></label>
       <textarea id="profile" rows="4" maxlength="4000" placeholder="For example: call me Alex, explain things step by step, and keep my goals in mind."></textarea>
       <label for="voice">Fish Audio voice ID <span>optional</span></label>
-      <input id="voice" type="text" maxlength="200" placeholder="Provider default" autocomplete="off" spellcheck="false">
-      <p class="hint">The free model may use a provider-selected voice; support for custom voice IDs can vary.</p>
+      <input id="voice" type="text" maxlength="200" placeholder="Jarvis (MCU)" autocomplete="off" spellcheck="false">
+      <p class="hint">Leave blank for the Jarvis voice, or enter a Fish Audio voice ID.</p>
       <div class="setting-row">
         <div><label for="sensitivity">Microphone sensitivity</label><p class="hint">Raise it if quiet speech is missed; lower it if background noise triggers listening.</p></div>
         <select id="sensitivity"><option value="0.018">Low</option><option value="0.009">Normal</option><option value="0.004">High</option></select>

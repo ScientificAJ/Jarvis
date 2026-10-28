@@ -47,6 +47,9 @@ class FakeModel:
     def get_result(self, stream):
         return f"decoded {len(stream.parts) - 1} packets"
 
+    def is_endpoint(self, stream):
+        return len(stream.parts) >= 3
+
 
 class StreamingRecognizerTests(unittest.TestCase):
     def setUp(self):
@@ -59,8 +62,9 @@ class StreamingRecognizerTests(unittest.TestCase):
 
     def test_ordered_audio_is_decoded_incrementally_and_finalized(self):
         partial = self.recognizer.accept(self.stream, 16000, 0, self.pcm)
-        self.assertEqual(partial, "decoded 1 packets")
-        self.assertEqual(self.recognizer.accept(self.stream, 16000, 1, self.pcm), "decoded 2 packets")
+        self.assertEqual(partial, {"text": "decoded 1 packets", "endpoint": False})
+        self.assertEqual(self.recognizer.accept(self.stream, 16000, 1, self.pcm),
+                         {"text": "decoded 2 packets", "endpoint": True})
         final = self.recognizer.finish(self.stream, 2)
         self.assertEqual(final, "decoded 3 packets")  # includes final padding
         stream = self.recognizer._model.streams[0]
@@ -79,7 +83,7 @@ class StreamingRecognizerTests(unittest.TestCase):
             self.recognizer.accept(self.stream, 16000, 2, self.pcm)
         with self.assertRaises(ValueError):
             self.recognizer.accept(self.stream, 44100, 1, self.pcm)
-        self.assertEqual(self.recognizer.accept(self.stream, 16000, 1, self.pcm), "decoded 2 packets")
+        self.assertEqual(self.recognizer.accept(self.stream, 16000, 1, self.pcm)["text"], "decoded 2 packets")
 
     def test_cancel_before_or_after_first_packet_prevents_resurrection(self):
         self.recognizer.cancel(self.stream)
@@ -147,6 +151,8 @@ class HotwordTests(unittest.TestCase):
                         recognizer.load()
 
                     self.assertEqual(recognizer.state, "ready", recognizer.detail)
+                    self.assertTrue(seen["enable_endpoint_detection"])
+                    self.assertEqual(seen["rule2_min_trailing_silence"], 2.0)
                     if enabled:
                         self.assertEqual(seen["decoding_method"], "modified_beam_search")
                         self.assertEqual(seen["modeling_unit"], "bpe")

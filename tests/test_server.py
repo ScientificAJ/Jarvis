@@ -8,7 +8,7 @@ import unittest
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from jarvis_server import CHAT_MODEL, VOICE_MODEL, JarvisHTTPServer, build_chat_payload, main
+from jarvis_server import CHAT_MODEL, DEFAULT_VOICE, VOICE_MODEL, JarvisHTTPServer, build_chat_payload, main
 
 
 class FakeRecognizer:
@@ -19,7 +19,7 @@ class FakeRecognizer:
         self.state = "ready"
 
     def accept(self, stream_id, rate, sequence, body):
-        return "local transcript"
+        return {"text": "local transcript", "endpoint": True}
 
     def finish(self, stream_id, sequence):
         return "local transcript"
@@ -72,6 +72,7 @@ class ServerTests(unittest.TestCase):
                                           "X-Jarvis-Sequence": "0"})
         self.assertEqual(status, 200)
         self.assertEqual(json.loads(body)["text"], "local transcript")
+        self.assertTrue(json.loads(body)["endpoint"])
         status, body = self.post("/api/transcribe/finish", {"stream": stream_id, "sequence": 1})
         self.assertEqual(status, 200)
         self.assertEqual(json.loads(body)["text"], "local transcript")
@@ -95,7 +96,9 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(body, b"fake mp3")
         path, payload, key = self.calls[-1]
         self.assertEqual((path, payload["model"], payload["response_format"]), ("/audio/speech", VOICE_MODEL, "mp3"))
-        self.assertNotIn("voice", payload, "Fish's default voice must not be replaced by an invented preset")
+        self.assertEqual(payload["voice"], DEFAULT_VOICE)
+        self.post("/api/speech", {"text": "Hello.", "voice": "custom-voice"})
+        self.assertEqual(self.calls[-1][1]["voice"], "custom-voice")
 
     def test_cross_origin_requests_are_rejected(self):
         status, body = self.post("/api/chat", {"text": "hello"}, origin="https://example.com")

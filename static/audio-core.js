@@ -13,6 +13,8 @@
       this.onVoice = options.onVoice || (() => {});
       this.onAudio = options.onAudio;
       this.onFinish = options.onFinish;
+      this.recentLevel = 0;
+      this.sinceStrongVoice = Infinity;
       this.reset();
     }
 
@@ -67,18 +69,23 @@
       }
     }
 
-    finish() {
+    finish(reason = "manual") {
       if (!this.speaking) return;
       if (this.count) this.onAudio(this.take(this.count));
       this.reset();
-      this.onFinish();
+      this.onFinish(reason);
     }
 
     push(block) {
       if (!block || !block.length) return;
       let energy = 0;
       for (let i = 0; i < block.length; i++) energy += block[i] * block[i];
-      const voiced = Math.sqrt(energy / block.length) >= this.threshold;
+      const level = Math.sqrt(energy / block.length);
+      const smoothing = 1 - Math.exp(-block.length / (this.sampleRate * 0.5));
+      this.recentLevel += smoothing * (level - this.recentLevel);
+      if (level >= Math.max(this.threshold * 1.5, this.recentLevel * 1.35)) this.sinceStrongVoice = 0;
+      else this.sinceStrongVoice += block.length;
+      const voiced = level >= this.threshold;
 
       if (!this.speaking) {
         if (!voiced) {
@@ -101,7 +108,7 @@
       if (voiced) { this.onVoice(); this.silentCount = 0; }
       else {
         this.silentCount += block.length;
-        if (this.silentCount >= this.silenceLimit) this.finish();
+        if (this.silentCount >= this.silenceLimit) this.finish("silence");
       }
     }
   }
@@ -122,7 +129,12 @@
       this.onInterrupt = options.onInterrupt;
       this.onCandidate = options.onCandidate || (() => {});
       this.stride = Math.max(1, Math.round(this.sampleRate / 8000));
+      this.ambientLevel = 0;
       this.reset();
+    }
+
+    setAmbientLevel(level) {
+      if (Number.isFinite(level)) this.ambientLevel = Math.max(0, Math.min(level, 0.25));
     }
 
     reset() {
@@ -196,7 +208,7 @@
         if (this.references[phase].length > refLimit) this.references[phase] = this.references[phase].slice(-refLimit);
       }
       const level = rms(mic);
-      const gate = Math.max(this.threshold * 1.5, playbackActive ? rms(ref) * 0.04 : 0);
+      const gate = Math.max(this.threshold * 1.5, this.ambientLevel * 1.8, playbackActive ? rms(ref) * 0.04 : 0);
       const echo = playbackActive && level >= gate && this.echoSimilarity(reduced.microphone) >= 0.82;
       const voice = level >= gate && !echo;
       const entry = { sequence: this.sequence++, samples: mic, echo };
@@ -234,10 +246,13 @@
       this.finalize = options.finalize;
       this.cancelRemote = options.cancel;
       this.onPartial = options.onPartial || (() => {});
+      this.onEndpoint = options.onEndpoint || (() => {});
       this.onError = options.onError || (() => {});
       this.tail = Promise.resolve();
       this.sequence = 0;
       this.pendingSamples = 0;
+      this.queue = [];
+      this.pumping = false;
       this.error = null;
       this.closed = false;
       this.cancelled = false;
@@ -260,16 +275,43 @@
         this.forgetRemote();
         return;
       }
-      const bytes = pcm16Bytes(samples);
-      const sequence = this.sequence++;
       this.pendingSamples += samples.length;
-      this.tail = this.tail.then(async () => {
-        if (this.cancelled || this.error) return;
-        const value = await this.send(this.id, this.rate, sequence, bytes);
-        if (!this.cancelled && value && typeof value.text === "string") this.onPartial(value.text);
-      }).catch(error => {
-        if (!this.cancelled && !this.error) { this.error = error; this.onError(error); }
-      }).finally(() => { this.pendingSamples -= samples.length; });
+      this.queue.push(samples);
+      if (!this.pumping) {
+        this.pumping = true;
+        this.tail = this.drain().catch(error => {
+          if (!this.cancelled && !this.error) { this.error = error; this.onError(error); }
+        }).finally(() => { this.pumping = false; });
+      }
+    }
+
+    async drain() {
+      while (this.queue.length && !this.cancelled && !this.error) {
+        // Combine queued packets when decoding falls behind. Keep every sample
+        // in order and stay under the server's two-second packet limit.
+        const parts = [];
+        let count = 0;
+        while (this.queue.length && count < this.rate) {
+          const part = this.queue[0];
+          const take = Math.min(part.length, this.rate - count);
+          parts.push(part.subarray(0, take));
+          count += take;
+          if (take === part.length) this.queue.shift();
+          else this.queue[0] = part.subarray(take);
+        }
+        const combined = new Float32Array(count);
+        let offset = 0;
+        for (const part of parts) { combined.set(part, offset); offset += part.length; }
+        const sequence = this.sequence++;
+        let value;
+        try { value = await this.send(this.id, this.rate, sequence, pcm16Bytes(combined)); }
+        finally { this.pendingSamples -= count; }
+        if (this.cancelled || this.error) break;
+        if (value && typeof value.text === "string") this.onPartial(value.text);
+        // A stale endpoint must not cut off later audio already waiting to be
+        // decoded. Let the queue catch up before finishing the utterance.
+        if (value?.endpoint && !this.pendingSamples && !this.closed) this.onEndpoint();
+      }
     }
 
     finish() {

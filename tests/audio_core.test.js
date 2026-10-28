@@ -176,4 +176,17 @@ function block(length, level) {
   assert.equal(view.getInt16(4, true), 32767);
 }
 
+// Steady background noise measured at the end of a request must not cancel
+// the answer, while a stronger interruption can still be heard.
+{
+  const rate = 8000;
+  let interruptions = 0;
+  const detector = new InterruptionDetector({ sampleRate: rate, onInterrupt: () => interruptions++ });
+  detector.setAmbientLevel(0.03);
+  for (let i = 0; i < 10; i++) detector.push(block(800, 0.03), block(800, 0), false);
+  assert.equal(interruptions, 0);
+  for (let i = 0; i < 4 && !interruptions; i++) detector.push(block(800, 0.12), block(800, 0), false);
+  assert.equal(interruptions, 1);
+}
+
 console.log("Audio capture and PCM tests passed.");

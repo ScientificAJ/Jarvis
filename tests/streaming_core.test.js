@@ -46,6 +46,27 @@ function deferred() {
   assert.deepEqual(sent, [0], "do not send queued packets after interruption");
   assert.deepEqual(cancelled, ["b".repeat(32)]);
 
+  // If decoding lags, combine waiting packets without dropping samples or
+  // cutting off a newer continuation at an endpoint from an older packet.
+  const lagging = deferred(), batches = [];
+  let endpoints = 0;
+  const buffered = new StreamingTranscription({
+    id: "d".repeat(32), sampleRate: 16000,
+    send: async (id, rate, seq, bytes) => {
+      batches.push([seq, bytes.byteLength]);
+      return seq === 0 ? lagging.promise : { text: "hello again", endpoint: true };
+    },
+    finalize: async (id, seq) => ({ text: `final ${seq}` }),
+    cancel: () => {}, onEndpoint: () => endpoints++
+  });
+  buffered.push(new Float32Array(4000));
+  for (let i = 0; i < 4; i++) buffered.push(new Float32Array(4000));
+  lagging.resolve({ text: "hello", endpoint: true });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(batches, [[0, 8000], [1, 32000]]);
+  assert.equal(endpoints, 1, "only the endpoint after the queue catches up may finish speech");
+  assert.deepEqual(await buffered.finish(), { text: "final 2" });
+
   const errors = [], cancelledSlow = [];
   const slow = new StreamingTranscription({
     id: "c".repeat(32), sampleRate: 16000,

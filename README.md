@@ -75,11 +75,13 @@ The launcher supports Intel and Apple-silicon Macs and 64-bit Linux on x64 or AR
 1. Select **Start Jarvis** on the page.
 2. In the browser's sharing prompt, choose **Entire Screen** and select **Share**. You can choose a single window instead if you prefer.
 3. Allow microphone access when your browser asks.
-4. Speak naturally. After about two seconds of silence, Jarvis finishes the request and answers aloud. For longer answers, it starts speaking a short section while preparing the next one. You can speak to interrupt it.
+4. Speak naturally. Your words appear in the **Live transcript** as they are recognized. After about two seconds of silence, Jarvis finishes the request and answers aloud. You can speak to interrupt it.
+
+If background noise keeps Jarvis listening, select **Send speech now** beneath the live transcript. Jarvis plays a short acknowledgement while it prepares an answer, when the speech service is available. The transcript may change as the local model recognizes more of the sentence.
 
 Use the microphone and screen buttons to turn them on or off. Select **New chat** to start again or **History** to open a previous conversation. You can also type in the message box. Close the command or terminal window to stop Jarvis.
 
-Jarvis uses a broad [cybersecurity vocabulary](resources/cybersecurity_hotwords.txt) as a local speech-recognition hint, and uses conversation and screen context to interpret likely transcription mistakes. You can edit the vocabulary and restart Jarvis to add terms. Hints can improve recognition but cannot guarantee every term is heard correctly; see [the vocabulary guide](resources/README.md) for details and how to turn hints off.
+Jarvis uses a broad [cybersecurity vocabulary](resources/cybersecurity_hotwords.txt) as a local speech-recognition hint, and uses conversation and screen context to interpret likely transcription mistakes. You can edit the vocabulary and restart Jarvis to add terms. Hints can improve recognition but cannot guarantee every term is heard correctly; see [the vocabulary guide](resources/README.md) for details and how to turn hints off. For its voice, Jarvis requests Fish Audio's [Jarvis (MCU) voice](https://fish.audio/m/612b878b113047d9a770c069c8b4fdfe/); you can enter another Fish Audio voice ID in Settings.
 
 ## How your information is used
 
@@ -98,7 +100,9 @@ To remove the saved key, open a terminal in the Jarvis folder and run `Jarvis.cm
 
 **Jarvis cannot hear me, interrupts itself, or misses my interruption.** Check your microphone permission and adjust **Microphone sensitivity** in Settings. Headphones can help reduce speaker echo. You can also use **Stop response**.
 
-**Jarvis keeps listening after I stop speaking.** Background noise may be keeping the microphone active. Choose **Low** microphone sensitivity in Settings or turn the microphone off to finish the current request. Try typing a message to check whether the online answer service is working.
+**No words appear in the live transcript.** Check that the microphone is on and the browser has permission to use the correct microphone. Try **High** microphone sensitivity in Settings and speak again.
+
+**Jarvis keeps listening after I stop speaking.** Background noise may be keeping the microphone active. Select **Send speech now** beneath the live transcript, or choose **Low** microphone sensitivity in Settings. Try typing a message to check whether the online answer service is working.
 
 **There is no spoken reply.** Try **Speak last answer**. If OpenRouter reports a key or rate-limit error, check your key and try again later.
 
@@ -110,6 +114,6 @@ To remove the saved key, open a terminal in the Jarvis folder and run `Jarvis.cm
 
 ## A few limits
 
-Jarvis is an AI assistant and can make mistakes. It can discuss the text and screen images you provide, but it does not browse the web, control your computer, or inspect files on its own. Fish Audio's provider-selected voice may not match the film character.
+Jarvis is an AI assistant and can make mistakes. It can discuss the text and screen images you provide, but it does not browse the web, control your computer, or inspect files on its own. Voice quality and availability depend on Fish Audio and OpenRouter.
 
 The English streaming model is [Zipformer, converted for Sherpa-ONNX](https://huggingface.co/csukuangfj/sherpa-onnx-streaming-zipformer-en-2023-06-26). Model files are downloaded from a pinned version and checked before use. Existing Bark model files from an earlier installation are left on disk but are no longer loaded.

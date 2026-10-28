@@ -5,7 +5,9 @@
   const ui = {
     status: $("status"), orb: $("orb"), start: $("start-button"), mic: $("mic-button"),
     screen: $("screen-button"), interrupt: $("interrupt-button"), preview: $("screen-preview"),
-    screenCard: $("screen-card"), messages: $("messages"), textForm: $("text-form"),
+    screenCard: $("screen-card"), transcriptCard: $("transcript-card"), transcriptLabel: $("transcript-label"),
+    liveTranscript: $("live-transcript"), finishSpeech: $("finish-speech-button"),
+    messages: $("messages"), textForm: $("text-form"),
     textInput: $("text-input"), send: $("send-button"), settings: $("settings-dialog"),
     settingsForm: $("settings-form"), profile: $("profile"), voice: $("voice"),
     sensitivity: $("sensitivity"), history: $("history-dialog"),
@@ -33,6 +35,7 @@
   chats = chats.filter(c => c && typeof c.id === "string" && Array.isArray(c.messages));
   let selectedId = readStored(SELECTED, "");
   let chat = chats.find(c => c.id === selectedId) || chats[0] || { id: newId(), messages: [] };
+  let acknowledgementCache = null;
 
   const state = {
     active: false, starting: false, model: "loading", environmentKey: false, phase: "idle",
@@ -78,6 +81,24 @@
     ui.send.disabled = state.phase !== "idle" && state.phase !== "listening";
     ui.orb.classList.toggle("active", state.active || state.phase === "thinking" || state.phase === "speaking");
     ui.replay.hidden = !chat.messages.some(m => m.role === "assistant");
+    renderLiveTranscript();
+  }
+
+  function renderLiveTranscript() {
+    const utterance = state.utterance;
+    const listening = state.active && state.micStream && state.phase === "listening";
+    ui.transcriptCard.hidden = !utterance && !listening;
+    if (!utterance) {
+      ui.transcriptLabel.textContent = "LIVE TRANSCRIPT";
+      ui.liveTranscript.textContent = listening ? "Speak to see your words here." : "";
+      ui.finishSpeech.hidden = true;
+      return;
+    }
+    const text = utterance.transcriptParts.map(part => part.text).filter(Boolean).join(" ");
+    ui.liveTranscript.textContent = text || "Listening…";
+    ui.liveTranscript.scrollTop = ui.liveTranscript.scrollHeight;
+    ui.transcriptLabel.textContent = state.phase === "transcribing" ? "FINISHING TRANSCRIPT" : "LIVE TRANSCRIPT";
+    ui.finishSpeech.hidden = !(state.phase === "listening" && utterance.stream && state.segmenter?.speaking);
   }
 
   function setPhase(phase, message) {
@@ -173,6 +194,7 @@
     if (state.aborter) state.aborter.abort();
     state.aborter = null;
     state.utterance = null;
+    renderLiveTranscript();
     if (state.segmenter) state.segmenter.reset();
     if (state.detector) state.detector.reset();
     if (state.playbackSource) { state.playbackSource.disconnect(); state.playbackSource = null; }
@@ -370,12 +392,13 @@
     if (state.utterance && state.utterance.generation === state.generation) {
       if (!state.utterance.stream) openTranscriptionStream(state.utterance);
       status("Listening...");
+      renderLiveTranscript();
       return;
     }
     const aborter = new AbortController();
     state.aborter = aborter;
     state.utterance = { generation: state.generation, aborter, pending: new JarvisAudio.PendingTranscription(),
-                        stream: null, streams: new Set(),
+                        stream: null, streams: new Set(), transcriptParts: [],
                         startedAt: now(), nextListeningHintAt: now() + 20000,
                         timeline: null, screenInterrupted: !state.displayStream };
     openTranscriptionStream(state.utterance);
@@ -388,6 +411,7 @@
     }
     recordFrame(true, "during", state.utterance);
     status("Listening...");
+    renderLiveTranscript();
   }
 
   function noteVoice() {
@@ -403,6 +427,8 @@
     const idBytes = new Uint8Array(16);
     crypto.getRandomValues(idBytes);
     const id = Array.from(idBytes, value => value.toString(16).padStart(2, "0")).join("");
+    const part = { text: "" };
+    utterance.transcriptParts.push(part);
     const stream = new JarvisAudio.StreamingTranscription({
       id, sampleRate: state.audioContext.sampleRate,
       send: async (streamId, rate, sequence, bytes) => {
@@ -424,16 +450,28 @@
         method: "POST", headers: apiHeaders(), body: JSON.stringify({ stream: streamId }), keepalive: true
       }).catch(() => {}),
       onPartial: text => {
-        if (state.utterance === utterance && state.phase === "listening" && text.trim()) {
-          status("Listening: " + text.trim().slice(-150));
+        if (text.trim()) part.text = text.trim();
+        if (state.utterance === utterance) renderLiveTranscript();
+      },
+      onEndpoint: () => {
+        const segmenter = state.segmenter;
+        if (state.utterance === utterance && utterance.stream === stream && state.phase === "listening" &&
+            segmenter?.speaking && segmenter.sinceStrongVoice >= segmenter.sampleRate * 0.35) {
+          segmenter.finish("endpoint");
         }
       },
       onError: error => {
         if (state.utterance === utterance && error.name !== "AbortError") {
           status(`Transcription failed: ${error.message}`, true);
+          queueMicrotask(() => {
+            if (state.utterance === utterance && state.phase === "listening" && state.segmenter?.speaking) {
+              state.segmenter.finish("error");
+            }
+          });
         }
       }
     });
+    stream.transcriptPart = part;
     utterance.stream = stream;
     utterance.streams.add(stream);
   }
@@ -443,14 +481,21 @@
     if (utterance?.stream) utterance.stream.push(samples);
   }
 
-  async function finishUtterance() {
+  async function finishUtterance(reason) {
     const utterance = state.utterance;
     if (!utterance || !utterance.stream) return;
+    if (reason !== "error" && state.detector && state.segmenter) {
+      state.detector.setAmbientLevel(state.segmenter.recentLevel);
+    }
     const stream = utterance.stream;
     utterance.stream = null;
     const task = stream.finish();
     utterance.pending.add(task);
-    task.then(() => utterance.streams.delete(stream));
+    task.then(result => {
+      utterance.streams.delete(stream);
+      if (result.text?.trim()) stream.transcriptPart.text = result.text.trim();
+      if (state.utterance === utterance) renderLiveTranscript();
+    });
     const waiting = utterance.pending.collect();
     const frames = snapshotFrames(utterance);
     setPhase("transcribing", "Finishing local transcription...");
@@ -464,11 +509,15 @@
     finally { clearTimeout(slowTimer); }
     if (!chunks || utterance.generation !== state.generation || state.utterance !== utterance) return;
     state.utterance = null;
+    renderLiveTranscript();
     const failed = chunks.find(chunk => chunk.error);
     if (failed) {
       if (failed.error.name !== "AbortError") {
+        const partial = utterance.transcriptParts.map(part => part.text).filter(Boolean).join(" ");
+        const restored = Boolean(partial && !ui.textInput.value.trim());
+        if (restored) ui.textInput.value = partial;
         resumeListening();
-        status(`Transcription failed: ${failed.error.message}`, true);
+        status(`Transcription failed: ${failed.error.message}${restored ? " Your partial transcript is in the message box." : ""}`, true);
       }
       return;
     }
@@ -545,7 +594,7 @@
         onStart: beginUtterance,
         onVoice: noteVoice,
         onAudio: samples => submitAudio(samples),
-        onFinish: finishUtterance
+        onFinish: reason => finishUtterance(reason)
       });
       const detector = new JarvisAudio.InterruptionDetector({
         sampleRate: context.sampleRate, threshold: Number(settings.sensitivity) || 0.009,
@@ -565,11 +614,11 @@
         if (!state.active || state.segmenter !== segmenter) return;
         const mic = event.data.microphone;
         const reference = event.data.reference;
-        if (state.phase === "listening" && now() >= state.echoGraceUntil) {
+        if (state.phase === "listening" && !state.audio && now() >= state.echoGraceUntil) {
           if (state.echoGraceUntil) { detector.reset(); state.echoGraceUntil = 0; }
           segmenter.push(mic);
           if (state.phase === "listening" && state.utterance && now() >= state.utterance.nextListeningHintAt) {
-            status("Still listening. If you've finished, lower microphone sensitivity or mute to send.");
+            status("Still listening. If you've finished, select Send speech now.");
             state.utterance.nextListeningHintAt = now() + 20000;
           }
           if (state.phase === "listening" && state.utterance && now() - state.lastTimelineProbeAt >= 800) {
@@ -602,6 +651,7 @@
   async function startAgent() {
     if (!requireKey()) return;
     if (!navigator.mediaDevices) { status("This browser does not support microphone and screen capture.", true); return; }
+    prepareAcknowledgement();
     invalidateTurn();
     state.active = true;
     state.starting = true;
@@ -649,14 +699,14 @@
       .trim();
   }
 
-  async function playSpeechSegment(blob) {
+  async function playSpeechSegment(blob, acknowledgement = false) {
     const url = URL.createObjectURL(blob);
     const audio = new Audio(url);
     state.audioUrl = url;
     state.audio = audio;
     connectPlaybackReference();
     const playbackSource = state.playbackSource;
-    status(state.micStream ? "Speaking. You can interrupt me." : "Speaking...");
+    status(acknowledgement ? "Checking your request..." : state.micStream ? "Speaking. You can interrupt me." : "Speaking...");
     let finishThisPlayback = null;
     let finishedNormally = false;
     try {
@@ -682,24 +732,56 @@
     return { finishedNormally, seconds: Number.isFinite(audio.currentTime) ? audio.currentTime : 0 };
   }
 
-  async function speak(text, generation, aborter, message) {
-    const segments = JarvisAudio.speechSegments(speechText(text).slice(0, 30000));
-    if (!segments.length) return;
-    state.playbackMessage = message;
+  function prepareAcknowledgement() {
+    const voice = settings.voice.trim();
+    if (acknowledgementCache?.voice === voice) return acknowledgementCache.promise;
+    const cache = { voice, promise: null };
+    cache.promise = request("/api/speech", {
+      method: "POST", headers: apiHeaders(),
+      body: JSON.stringify({ text: "I'm checking on that.", voice })
+    }).then(response => response.blob()).catch(() => {
+      if (acknowledgementCache === cache) acknowledgementCache = null;
+      return null;
+    });
+    acknowledgementCache = cache;
+    return cache.promise;
+  }
+
+  function acknowledgeWhileThinking(generation, aborter) {
+    const acknowledgement = { allowed: true, playing: null };
+    prepareAcknowledgement().then(blob => {
+      if (!blob || !acknowledgement.allowed || generation !== state.generation ||
+          aborter.signal.aborted || state.phase !== "thinking") return;
+      acknowledgement.playing = playSpeechSegment(blob, true).catch(() => {});
+    });
+    return acknowledgement;
+  }
+
+  async function speak(text, generation, aborter, message, acknowledgement = null) {
+    const spoken = speechText(text).slice(0, 30000);
+    if (!spoken) return;
+    state.playbackMessage = null;
     state.playbackOffset = 0;
-    if (state.detector) state.detector.reset();
     setPhase("speaking", "Preparing the spoken response...");
-    const prepare = segment => request("/api/speech", {
+    // One synthesis request keeps the same voice and delivery for the entire
+    // answer. Prepare it while the short acknowledgement is playing.
+    const prepared = request("/api/speech", {
       method: "POST", headers: apiHeaders(), signal: aborter.signal,
-      body: JSON.stringify({ text: segment, voice: settings.voice })
+      body: JSON.stringify({ text: spoken, voice: settings.voice })
     }).then(response => response.blob());
     let completed = false;
     try {
-      completed = await JarvisAudio.playSpeechQueue(segments, {
-        prepare, play: playSpeechSegment,
-        cancelled: () => generation !== state.generation || aborter.signal.aborted,
-        onPlayed: played => { state.playbackOffset += played.seconds; }
-      });
+      // Attach a rejection handler immediately while waiting for the acknowledgement.
+      const result = prepared.then(blob => ({ blob }), error => ({ error }));
+      if (acknowledgement?.playing) await acknowledgement.playing;
+      const audio = await result;
+      if (audio.error) throw audio.error;
+      if (generation !== state.generation || aborter.signal.aborted) return;
+      state.playbackMessage = message;
+      if (state.detector) state.detector.reset();
+      const played = await playSpeechSegment(audio.blob);
+      state.playbackOffset += played.seconds;
+      completed = played.finishedNormally;
     } finally {
       if (generation === state.generation) {
         state.playbackMessage = null;
@@ -727,6 +809,7 @@
     }
     appendMessage("user", text);
     setPhase("thinking", "Considering your request...");
+    const acknowledgement = acknowledgeWhileThinking(generation, aborter);
     const at = now();
     const sharing = Boolean(state.displayStream);
     const currentFrames = JarvisScreen.framesForRequest(screen, state.screenVersion, sharing, at);
@@ -740,10 +823,11 @@
         method: "POST", headers: apiHeaders(), signal: aborter.signal,
         body: JSON.stringify({ text, history: previous, profile: settings.profile, frames, screen_context: screenContext })
       });
+      acknowledgement.allowed = false;
       const answer = (await result.json()).text;
       if (generation !== state.generation) return;
       const message = appendMessage("assistant", answer);
-      try { await speak(answer, generation, aborter, message); }
+      try { await speak(answer, generation, aborter, message, acknowledgement); }
       catch (error) {
         if (generation !== state.generation || error.name === "AbortError") return;
         resumeListening();
@@ -752,6 +836,7 @@
       }
       if (generation === state.generation) resumeListening();
     } catch (error) {
+      acknowledgement.allowed = false;
       if (generation !== state.generation || error.name === "AbortError") return;
       resumeListening();
       status(`I couldn't complete that request: ${error.message}`, true);
@@ -814,6 +899,9 @@
   }
 
   ui.start.addEventListener("click", () => state.active ? stopAgent() : startAgent());
+  ui.finishSpeech.addEventListener("click", () => {
+    if (state.phase === "listening" && state.segmenter?.speaking) state.segmenter.finish("manual");
+  });
   ui.mic.addEventListener("click", async () => {
     if (state.micStream) {
       stopMic(true);
@@ -844,6 +932,7 @@
   ui.settingsForm.addEventListener("submit", event => {
     event.preventDefault();
     settings = { profile: ui.profile.value.trim(), voice: ui.voice.value.trim(), sensitivity: ui.sensitivity.value };
+    if (state.active) prepareAcknowledgement();
     const saved = store(SETTINGS, settings);
     if (state.segmenter) state.segmenter.threshold = Number(settings.sensitivity);
     if (state.detector) state.detector.threshold = Number(settings.sensitivity);

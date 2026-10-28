@@ -30,9 +30,9 @@ def main():
     sequence = 0
     saw_partial = False
     for offset in range(0, len(pcm), packet_size):
-        text = recognizer.accept(stream, rate, sequence, pcm[offset:offset + packet_size])
+        result = recognizer.accept(stream, rate, sequence, pcm[offset:offset + packet_size])
         sequence += 1
-        if text and offset + packet_size < len(pcm):
+        if result["text"] and offset + packet_size < len(pcm):
             saw_partial = True
     transcript = recognizer.finish(stream, sequence)
     print(f"{frames / rate:.2f}s of audio processed in {time.monotonic() - started:.2f}s.")

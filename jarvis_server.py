@@ -25,6 +25,7 @@ from jarvis_startup import StartupCancelled, request_api_key
 STATIC = ROOT / "static"
 CHAT_MODEL = "dots-studio/dots-3-note-preview:free"
 VOICE_MODEL = "fish-audio/s2.1-pro-free:free"
+DEFAULT_VOICE = "612b878b113047d9a770c069c8b4fdfe"  # Fish Audio's public Jarvis (MCU) voice
 OPENROUTER = "https://openrouter.ai/api/v1"
 MAX_BODY = 16 * 1024 * 1024
 ASSETS = {
@@ -269,8 +270,8 @@ class Handler(BaseHTTPRequestHandler):
                     sequence = int(self.headers.get("X-Jarvis-Sequence", ""))
                 except ValueError as exc:
                     raise ValueError("Invalid audio packet details.") from exc
-                text = self.server.recognizer.accept(self.headers.get("X-Jarvis-Stream", ""), rate, sequence, raw)
-                return self._json(200, {"text": text})
+                result = self.server.recognizer.accept(self.headers.get("X-Jarvis-Stream", ""), rate, sequence, raw)
+                return self._json(200, result)
             if content_type != "application/json":
                 raise ValueError("Expected a JSON request.")
             try:
@@ -299,9 +300,8 @@ class Handler(BaseHTTPRequestHandler):
                     raise ValueError("Speech text must be between 1 and 30,000 characters.")
                 if not isinstance(voice, str) or len(voice) > 200:
                     raise ValueError("Invalid voice setting.")
-                payload = {"model": VOICE_MODEL, "input": text.strip(), "response_format": "mp3"}
-                if voice.strip():
-                    payload["voice"] = voice.strip()
+                payload = {"model": VOICE_MODEL, "input": text.strip(), "response_format": "mp3",
+                           "voice": voice.strip() or DEFAULT_VOICE}
                 audio, kind = self.server.opener("/audio/speech", payload, key)
                 if not audio or len(audio) > 20 * 1024 * 1024 or not kind.startswith("audio/"):
                     raise UpstreamError("OpenRouter did not return valid speech audio.")

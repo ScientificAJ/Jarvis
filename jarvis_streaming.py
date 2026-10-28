@@ -78,7 +78,9 @@ class StreamingRecognizer:
             print("Loading the lightweight local streaming speech model...", flush=True)
             options = dict(tokens=str(paths[3]), encoder=str(paths[0]), decoder=str(paths[1]), joiner=str(paths[2]),
                            num_threads=min(threads, os.cpu_count() or 1), sample_rate=16000, feature_dim=80,
-                           enable_endpoint_detection=False, provider="cpu")
+                           enable_endpoint_detection=True, rule1_min_trailing_silence=3.0,
+                           rule2_min_trailing_silence=2.0, rule3_min_utterance_length=3600.0,
+                           provider="cpu")
             phrases = []
             if os.environ.get("JARVIS_CYBER_HOTWORDS", "1") != "0":
                 if not HOTWORDS.is_file() or not BPE_VOCAB.is_file():
@@ -128,11 +130,14 @@ class StreamingRecognizer:
         while len(self._closed) > 256:
             del self._closed[next(iter(self._closed))]
 
-    def _decode(self, stream):
+    def _decode(self, stream, include_endpoint=False):
         with self._decode_lock:
             while self._model.is_ready(stream):
                 self._model.decode_stream(stream)
-            return self._model.get_result(stream).strip()
+            text = self._model.get_result(stream).strip()
+            if include_endpoint:
+                return {"text": text, "endpoint": bool(text and self._model.is_endpoint(stream))}
+            return text
 
     def accept(self, stream_id, rate, sequence, pcm):
         if self.state != "ready":
@@ -172,7 +177,7 @@ class StreamingRecognizer:
             session.stream.accept_waveform(rate, samples)
             session.total_samples += len(samples)
             session.next_sequence += 1
-            return self._decode(session.stream)
+            return self._decode(session.stream, include_endpoint=True)
 
     def finish(self, stream_id, sequence):
         self._validate_id(stream_id)
