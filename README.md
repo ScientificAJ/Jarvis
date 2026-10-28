@@ -75,9 +75,9 @@ The launcher supports Intel and Apple-silicon Macs and 64-bit Linux on x64 or AR
 1. Select **Start Jarvis** on the page.
 2. In the browser's sharing prompt, choose **Entire Screen** and select **Share**. You can choose a single window instead if you prefer.
 3. Allow microphone access when your browser asks.
-4. Speak naturally. Your words appear in the **Live transcript** as they are recognized. After about two seconds of silence, Jarvis finishes the request and answers aloud. You can speak to interrupt it.
+4. Speak naturally. Your words appear in the **Live transcript** as they are recognized. Jarvis aims to finish after roughly three-quarters of a second of quiet, then answers aloud. You can speak to interrupt it.
 
-If background noise keeps Jarvis listening, select **Send speech now** beneath the live transcript. Jarvis plays a short acknowledgement while it prepares an answer, when the speech service is available. The transcript may change as the local model recognizes more of the sentence.
+If background noise keeps Jarvis listening, select **Send speech now** beneath the live transcript. Jarvis plays a short acknowledgement while it finishes transcription and prepares an answer, when the speech service is available. It prepares this phrase in advance and can cache it in your browser. The transcript may change as the local model recognizes more of the sentence. A short pause may end a request sooner than intended; continuing immediately can resume it while transcription is still finishing.
 
 Use the microphone and screen buttons to turn them on or off. Select **New chat** to start again or **History** to open a previous conversation. You can also type in the message box. Close the command or terminal window to stop Jarvis.
 
@@ -85,7 +85,7 @@ Jarvis uses a broad [cybersecurity vocabulary](resources/cybersecurity_hotwords.
 
 ## How your information is used
 
-- **Your voice:** Speech is transcribed continuously on your computer as you speak. The complete request is submitted after about two seconds of silence. The local model recognizes English and can make mistakes, especially with unfamiliar accents or noisy audio.
+- **Your voice:** Speech is transcribed continuously on your computer as you speak. The complete request is submitted after a brief pause. Background noise and computer speed can extend the wait. The local model recognizes English and can make mistakes, especially with unfamiliar accents or noisy audio.
 - **Your screen:** The preview is live. When you ask something, Jarvis sends selected, time-ordered screen images to OpenRouter—not a continuous video. It can include a small amount of screen context from the previous turn. Brief changes or small text may be missed. Turning screen sharing off prevents pending or retained images from being sent; images already sent cannot be withdrawn.
 - **Your messages:** Your request, relevant conversation history, personal preferences, and selected screen images are sent to OpenRouter and its model provider. The answer is sent to OpenRouter for speech synthesis.
 - **Your key and chats:** Jarvis saves an entered key in Windows Credential Manager, macOS Keychain, or a Linux Secret Service when available, and uses it in the local server while running. It does not save the key in the project or a temporary file. Chats and personal settings are stored in your browser on your computer. A key saved by an older version of Jarvis may remain in browser storage until you save Settings again or clear the site's data.
@@ -106,7 +106,7 @@ To remove the saved key, open a terminal in the Jarvis folder and run `Jarvis.cm
 
 **There is no spoken reply.** Try **Speak last answer**. If OpenRouter reports a key or rate-limit error, check your key and try again later.
 
-**The model is slow.** Close other memory-heavy applications and try again. The local model is loaded and warmed before the browser opens and processes speech as it arrives. Performance varies with the processor and available memory; very old computers may still struggle.
+**The model is slow.** Close other memory-heavy applications and try again. The local model is loaded and warmed before the browser opens and processes speech as it arrives. Performance varies with the processor and available memory; very old computers may still struggle. OpenRouter's free answer and speech services can also have variable delays. Jarvis requests medium reasoning and generates each reply as one voice clip for consistency, so longer answers may take longer to start speaking.
 
 **Jarvis asks for my key every time.** Check the command window for a secure-storage warning. On Linux, install `secret-tool` and make sure your desktop's Secret Service or keyring is running and unlocked. If a secure store is unavailable, Jarvis uses the key for the current session only rather than saving it in plain text.
 

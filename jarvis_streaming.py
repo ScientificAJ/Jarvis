@@ -78,8 +78,8 @@ class StreamingRecognizer:
             print("Loading the lightweight local streaming speech model...", flush=True)
             options = dict(tokens=str(paths[3]), encoder=str(paths[0]), decoder=str(paths[1]), joiner=str(paths[2]),
                            num_threads=min(threads, os.cpu_count() or 1), sample_rate=16000, feature_dim=80,
-                           enable_endpoint_detection=True, rule1_min_trailing_silence=3.0,
-                           rule2_min_trailing_silence=2.0, rule3_min_utterance_length=3600.0,
+                           enable_endpoint_detection=True, rule1_min_trailing_silence=1.2,
+                           rule2_min_trailing_silence=0.75, rule3_min_utterance_length=3600.0,
                            provider="cpu")
             phrases = []
             if os.environ.get("JARVIS_CYBER_HOTWORDS", "1") != "0":

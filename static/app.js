@@ -398,8 +398,8 @@
     const aborter = new AbortController();
     state.aborter = aborter;
     state.utterance = { generation: state.generation, aborter, pending: new JarvisAudio.PendingTranscription(),
-                        stream: null, streams: new Set(), transcriptParts: [],
-                        startedAt: now(), nextListeningHintAt: now() + 20000,
+                        stream: null, streams: new Set(), transcriptParts: [], acknowledgement: null,
+                        startedAt: now(), lastTranscriptChangeAt: now(), nextListeningHintAt: now() + 6000,
                         timeline: null, screenInterrupted: !state.displayStream };
     openTranscriptionStream(state.utterance);
     const before = state.interruptionFrame;
@@ -450,7 +450,10 @@
         method: "POST", headers: apiHeaders(), body: JSON.stringify({ stream: streamId }), keepalive: true
       }).catch(() => {}),
       onPartial: text => {
-        if (text.trim()) part.text = text.trim();
+        if (text.trim() && part.text !== text.trim()) {
+          part.text = text.trim();
+          utterance.lastTranscriptChangeAt = now();
+        }
         if (state.utterance === utterance) renderLiveTranscript();
       },
       onEndpoint: () => {
@@ -497,13 +500,18 @@
       if (state.utterance === utterance) renderLiveTranscript();
     });
     const waiting = utterance.pending.collect();
-    const frames = snapshotFrames(utterance);
     setPhase("transcribing", "Finishing local transcription...");
+    if (reason !== "error") utterance.acknowledgement = acknowledgeWhileWaiting(utterance.generation, utterance.aborter);
+    // Let playback begin before encoding a full-resolution screen frame,
+    // which can block the browser on a slower computer.
+    await new Promise(resolve => setTimeout(resolve, 0));
+    if (utterance.generation !== state.generation || state.utterance !== utterance || state.phase !== "transcribing") return;
+    const frames = snapshotFrames(utterance);
     const slowTimer = setTimeout(() => {
       if (state.phase === "transcribing" && state.utterance === utterance) {
         status("Still transcribing on this computer. Close other memory-heavy apps if this is slow.");
       }
-    }, 12000);
+    }, 3000);
     let chunks;
     try { chunks = await waiting; }
     finally { clearTimeout(slowTimer); }
@@ -512,6 +520,7 @@
     renderLiveTranscript();
     const failed = chunks.find(chunk => chunk.error);
     if (failed) {
+      stopAcknowledgement(utterance.acknowledgement);
       if (failed.error.name !== "AbortError") {
         const partial = utterance.transcriptParts.map(part => part.text).filter(Boolean).join(" ");
         const restored = Boolean(partial && !ui.textInput.value.trim());
@@ -523,10 +532,11 @@
     }
     const transcript = chunks.map(chunk => chunk.text.trim()).filter(Boolean).join(" ");
     if (!transcript) {
+      stopAcknowledgement(utterance.acknowledgement);
       resumeListening("I couldn't make out any speech. Please try again.");
       return;
     }
-    await runTurn(transcript, frames, utterance.generation, utterance.aborter);
+    await runTurn(transcript, frames, utterance.generation, utterance.aborter, utterance.acknowledgement);
   }
 
   function voiceInterruption(blocks) {
@@ -535,6 +545,8 @@
       // The user resumed before the pending local transcription finished.
       // Keep the earlier chunks and join the continuation into the same turn.
       state.utterance.pending.resume();
+      stopAcknowledgement(state.utterance.acknowledgement);
+      state.utterance.acknowledgement = null;
       if (state.utterance.timeline) {
         for (const frame of state.utterance.timeline.frames) frame.phase = "during";
       }
@@ -589,7 +601,7 @@
       gain.gain.value = 0;
       const segmenter = new JarvisAudio.SpeechSegmenter({
         sampleRate: context.sampleRate,
-        silenceSeconds: 2,
+        silenceSeconds: 0.75,
         threshold: Number(settings.sensitivity) || 0.009,
         onStart: beginUtterance,
         onVoice: noteVoice,
@@ -617,9 +629,10 @@
         if (state.phase === "listening" && !state.audio && now() >= state.echoGraceUntil) {
           if (state.echoGraceUntil) { detector.reset(); state.echoGraceUntil = 0; }
           segmenter.push(mic);
-          if (state.phase === "listening" && state.utterance && now() >= state.utterance.nextListeningHintAt) {
+          if (state.phase === "listening" && state.utterance && now() >= state.utterance.nextListeningHintAt &&
+              now() - state.utterance.lastTranscriptChangeAt >= 3000) {
             status("Still listening. If you've finished, select Send speech now.");
-            state.utterance.nextListeningHintAt = now() + 20000;
+            state.utterance.nextListeningHintAt = now() + 10000;
           }
           if (state.phase === "listening" && state.utterance && now() - state.lastTimelineProbeAt >= 800) {
             const timeline = state.utterance.timeline;
@@ -736,10 +749,24 @@
     const voice = settings.voice.trim();
     if (acknowledgementCache?.voice === voice) return acknowledgementCache.promise;
     const cache = { voice, promise: null };
-    cache.promise = request("/api/speech", {
-      method: "POST", headers: apiHeaders(),
-      body: JSON.stringify({ text: "I'm checking on that.", voice })
-    }).then(response => response.blob()).catch(() => {
+    cache.promise = (async () => {
+      let saved = null;
+      const cacheKey = `${location.origin}/__jarvis-ack-v1/${encodeURIComponent(voice || "default")}`;
+      try {
+        if (globalThis.caches) {
+          saved = await caches.open("jarvis.acknowledgement.v1");
+          const response = await saved.match(cacheKey);
+          if (response) return await response.blob();
+        }
+      } catch (_) { saved = null; }
+      const response = await request("/api/speech", {
+        method: "POST", headers: apiHeaders(),
+        body: JSON.stringify({ text: "I'm checking on that.", voice })
+      });
+      const blob = await response.blob();
+      if (saved) saved.put(cacheKey, new Response(blob, { headers: { "Content-Type": "audio/mpeg" } })).catch(() => {});
+      return blob;
+    })().catch(() => {
       if (acknowledgementCache === cache) acknowledgementCache = null;
       return null;
     });
@@ -747,14 +774,24 @@
     return cache.promise;
   }
 
-  function acknowledgeWhileThinking(generation, aborter) {
-    const acknowledgement = { allowed: true, playing: null };
+  function acknowledgeWhileWaiting(generation, aborter) {
+    const acknowledgement = { allowed: true, playing: null, audio: null };
     prepareAcknowledgement().then(blob => {
       if (!blob || !acknowledgement.allowed || generation !== state.generation ||
-          aborter.signal.aborted || state.phase !== "thinking") return;
+          aborter.signal.aborted || !["transcribing", "thinking"].includes(state.phase)) return;
       acknowledgement.playing = playSpeechSegment(blob, true).catch(() => {});
+      acknowledgement.audio = state.audio;
     });
     return acknowledgement;
+  }
+
+  function stopAcknowledgement(acknowledgement) {
+    if (!acknowledgement) return;
+    acknowledgement.allowed = false;
+    if (acknowledgement.audio && state.audio === acknowledgement.audio) {
+      acknowledgement.audio.pause();
+      if (state.finishPlayback) state.finishPlayback();
+    }
   }
 
   async function speak(text, generation, aborter, message, acknowledgement = null) {
@@ -795,7 +832,7 @@
     }
   }
 
-  async function runTurn(text, screen, generation, aborter) {
+  async function runTurn(text, screen, generation, aborter, existingAcknowledgement = null) {
     const previous = [];
     let remainingHistory = 120000;
     for (const m of chat.messages.slice(-60).reverse()) {
@@ -809,7 +846,7 @@
     }
     appendMessage("user", text);
     setPhase("thinking", "Considering your request...");
-    const acknowledgement = acknowledgeWhileThinking(generation, aborter);
+    const acknowledgement = existingAcknowledgement || acknowledgeWhileWaiting(generation, aborter);
     const at = now();
     const sharing = Boolean(state.displayStream);
     const currentFrames = JarvisScreen.framesForRequest(screen, state.screenVersion, sharing, at);
@@ -977,6 +1014,7 @@
       const changed = state.model !== value.model;
       state.model = value.model;
       state.environmentKey = value.key_from_environment;
+      if (value.model === "ready" && state.environmentKey) prepareAcknowledgement();
       if (changed && !state.active && state.phase === "idle") status(value.detail, value.model === "error");
       renderControls();
       if (value.model === "loading") setTimeout(pollModel, 2000);

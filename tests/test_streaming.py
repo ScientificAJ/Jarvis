@@ -152,7 +152,7 @@ class HotwordTests(unittest.TestCase):
 
                     self.assertEqual(recognizer.state, "ready", recognizer.detail)
                     self.assertTrue(seen["enable_endpoint_detection"])
-                    self.assertEqual(seen["rule2_min_trailing_silence"], 2.0)
+                    self.assertEqual(seen["rule2_min_trailing_silence"], 0.75)
                     if enabled:
                         self.assertEqual(seen["decoding_method"], "modified_beam_search")
                         self.assertEqual(seen["modeling_unit"], "bpe")

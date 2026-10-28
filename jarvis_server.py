@@ -172,8 +172,8 @@ def build_chat_payload(data: dict) -> dict:
     messages.append({"role": "user", "content": content})
     # Give the model room for both reasoning and the answer; the free route
     # remains explicitly selected and reasoning details are not spoken or saved.
-    return {"model": CHAT_MODEL, "messages": messages, "max_tokens": 8192,
-            "reasoning": {"enabled": True, "exclude": True}, "stream": False}
+    return {"model": CHAT_MODEL, "messages": messages, "max_tokens": 4096,
+            "reasoning": {"effort": "medium", "exclude": True}, "stream": False}
 
 
 def extract_answer(raw: bytes) -> str:

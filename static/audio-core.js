@@ -6,7 +6,7 @@
     constructor(options) {
       this.sampleRate = options.sampleRate;
       this.limit = Math.round(this.sampleRate * 0.25);
-      this.silenceLimit = Math.round(this.sampleRate * (options.silenceSeconds || 2));
+      this.silenceLimit = Math.round(this.sampleRate * (options.silenceSeconds ?? 0.75));
       this.threshold = options.threshold || 0.009;
       this.preLimit = Math.round(this.sampleRate * 0.15);
       this.onStart = options.onStart || (() => {});
@@ -23,6 +23,7 @@
       this.pre = [];
       this.preCount = 0;
       this.silentCount = 0;
+      this.silenceParts = [];
       this.parts = [];
       this.count = 0;
     }
@@ -71,6 +72,15 @@
 
     finish(reason = "manual") {
       if (!this.speaking) return;
+      // Keep the first part of a quiet ending for soft consonants, but do not
+      // make the recognizer process the full pause after the user has stopped.
+      let tail = Math.round(this.sampleRate * 0.4);
+      for (const part of this.silenceParts) {
+        const amount = Math.min(tail, part.length);
+        this.addPart(part.subarray(0, amount));
+        tail -= amount;
+        if (!tail) break;
+      }
       if (this.count) this.onAudio(this.take(this.count));
       this.reset();
       this.onFinish(reason);
@@ -103,10 +113,15 @@
         return;
       }
 
-      this.addPart(block);
-      this.flushFull();
-      if (voiced) { this.onVoice(); this.silentCount = 0; }
-      else {
+      if (voiced) {
+        for (const part of this.silenceParts) this.addPart(part);
+        this.silenceParts = [];
+        this.silentCount = 0;
+        this.addPart(block);
+        this.flushFull();
+        this.onVoice();
+      } else {
+        this.silenceParts.push(block);
         this.silentCount += block.length;
         if (this.silentCount >= this.silenceLimit) this.finish("silence");
       }

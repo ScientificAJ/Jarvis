@@ -95,7 +95,7 @@ function block(length, level) {
   let finishes = 0;
   const rate = 16000;
   const segmenter = new SpeechSegmenter({
-    sampleRate: rate, onStart: () => starts++, onAudio: x => chunks.push(x), onFinish: () => finishes++
+    sampleRate: rate, silenceSeconds: 2, onStart: () => starts++, onAudio: x => chunks.push(x), onFinish: () => finishes++
   });
   for (let i = 0; i < 120; i++) segmenter.push(block(rate, 0.1));
   assert.equal(chunks.length, 480);
@@ -106,7 +106,7 @@ function block(length, level) {
   segmenter.push(block(rate, 0));
   assert.equal(finishes, 1);
   assert.equal(starts, 1);
-  assert.equal(chunks.reduce((sum, c) => sum + c.length, 0), 122 * rate);
+  assert.equal(chunks.reduce((sum, c) => sum + c.length, 0), 120.4 * rate);
 }
 
 // Short pauses stay in the stream; they do not end the request.
@@ -114,7 +114,7 @@ function block(length, level) {
   const rate = 1000;
   const chunks = [];
   let finished = 0;
-  const segmenter = new SpeechSegmenter({ sampleRate: rate, onAudio: x => chunks.push(x), onFinish: () => finished++ });
+  const segmenter = new SpeechSegmenter({ sampleRate: rate, silenceSeconds: 2, onAudio: x => chunks.push(x), onFinish: () => finished++ });
   segmenter.push(block(12000, 0.1));
   segmenter.push(block(700, 0));
   assert.equal(finished, 0);
@@ -122,7 +122,7 @@ function block(length, level) {
   segmenter.push(block(2000, 0));
   assert.equal(finished, 1);
   const all = chunks.flatMap(c => Array.from(c));
-  assert.equal(all.length, 19200);
+  assert.equal(all.length, 17600);
   assert.equal(all[12000], 0, "a pause within speech should remain in the audio");
 }
 
@@ -130,14 +130,14 @@ function block(length, level) {
 {
   const chunks = [];
   let finished = 0;
-  const segmenter = new SpeechSegmenter({ sampleRate: 1000, onAudio: x => chunks.push(x), onFinish: () => finished++ });
+  const segmenter = new SpeechSegmenter({ sampleRate: 1000, silenceSeconds: 2, onAudio: x => chunks.push(x), onFinish: () => finished++ });
   segmenter.push(block(2400, 0.1));
   assert.equal(chunks.length, 9, "audio packets should be sent before the user stops");
   segmenter.push(block(1000, 0));
   assert.equal(finished, 0, "do not submit the request after a one-second pause");
   segmenter.push(block(1000, 0));
   assert.equal(finished, 1);
-  assert.equal(chunks.reduce((sum, part) => sum + part.length, 0), 4400);
+  assert.equal(chunks.reduce((sum, part) => sum + part.length, 0), 2800);
 }
 
 // When a longer pause is followed by more speech, both parts stay in the same
@@ -145,7 +145,7 @@ function block(length, level) {
 {
   const chunks = [];
   let finished = 0;
-  const segmenter = new SpeechSegmenter({ sampleRate: 1000, onAudio: x => chunks.push(x), onFinish: () => finished++ });
+  const segmenter = new SpeechSegmenter({ sampleRate: 1000, silenceSeconds: 2, onAudio: x => chunks.push(x), onFinish: () => finished++ });
   segmenter.push(block(1400, 0.1));
   segmenter.push(block(1200, 0));
   segmenter.push(block(800, 0.2));
@@ -154,7 +154,21 @@ function block(length, level) {
   const all = chunks.flatMap(c => Array.from(c));
   assert.equal(all.filter(v => v > 0.05 && v < 0.15).length, 1400);
   assert.equal(all.filter(v => v > 0.15).length, 800);
-  assert.equal(all.length, 5400);
+  assert.equal(all.length, 3800);
+}
+
+// The default endpoint is faster, retains a soft ending and does not enqueue
+// the full quiet pause for the local recognizer.
+{
+  const chunks = [];
+  let finished = 0;
+  const segmenter = new SpeechSegmenter({ sampleRate: 1000, onAudio: x => chunks.push(x), onFinish: () => finished++ });
+  segmenter.push(block(1500, 0.1));
+  segmenter.push(block(700, 0.001));
+  assert.equal(finished, 0);
+  segmenter.push(block(50, 0.001));
+  assert.equal(finished, 1);
+  assert.equal(chunks.reduce((sum, part) => sum + part.length, 0), 1900);
 }
 
 // Muting mid-sentence flushes the remainder instead of losing it.
