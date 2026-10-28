@@ -38,7 +38,7 @@
     active: false, starting: false, model: "loading", environmentKey: false, phase: "idle",
     generation: 0, aborter: null, utterance: null, micStream: null, displayStream: null,
     audioContext: null, source: null, worklet: null, silenceGain: null, segmenter: null, detector: null,
-    audio: null, audioUrl: null, playbackSource: null, playbackMessage: null, finishPlayback: null,
+    audio: null, audioUrl: null, playbackSource: null, playbackMessage: null, playbackOffset: 0, finishPlayback: null,
     echoGraceUntil: 0, frameTimer: null, screenVersion: 0, screenSignature: null, lastTimelineProbeAt: 0, interruptionFrame: null,
     previousScreen: null,
     statusText: "Preparing the local speech model...", statusError: false
@@ -120,13 +120,35 @@
   }
 
   async function request(path, options = {}) {
-    const response = await fetch(path, options);
-    if (!response.ok) {
-      let message = `Request failed (${response.status}).`;
-      try { message = (await response.json()).error || message; } catch (_) {}
-      throw new Error(message);
+    const timeoutMs = path === "/api/transcribe" ? 180000 :
+      path === "/api/chat" ? 90000 : path === "/api/speech" ? 60000 : 10000;
+    const controller = new AbortController();
+    const parent = options.signal;
+    const cancel = () => controller.abort();
+    if (parent?.aborted) cancel();
+    else parent?.addEventListener("abort", cancel, { once: true });
+    let timedOut = false;
+    const timer = setTimeout(() => { timedOut = true; controller.abort(); }, timeoutMs);
+    try {
+      const response = await fetch(path, { ...options, signal: controller.signal });
+      if (!response.ok) {
+        let message = `Request failed (${response.status}).`;
+        try { message = (await response.json()).error || message; } catch (_) {}
+        throw new Error(message);
+      }
+      return response;
+    } catch (error) {
+      if (timedOut) {
+        if (path === "/api/transcribe") throw new Error("Local transcription took too long. Close other memory-heavy apps and try again.");
+        if (path === "/api/chat") throw new Error("The answer service took too long. Please try again.");
+        if (path === "/api/speech") throw new Error("The speech service took too long. You can read the answer or try Speak last answer.");
+        throw new Error("The local server took too long to respond.");
+      }
+      throw error;
+    } finally {
+      clearTimeout(timer);
+      parent?.removeEventListener("abort", cancel);
     }
-    return response;
   }
 
   function apiHeaders() {
@@ -142,7 +164,7 @@
   function invalidateTurn() {
     if (state.phase === "speaking" && state.playbackMessage) {
       state.playbackMessage.interrupted = true;
-      state.playbackMessage.spoken_seconds = Math.max(0, Math.min(86400, state.audio?.currentTime || 0));
+      state.playbackMessage.spoken_seconds = Math.max(0, Math.min(86400, state.playbackOffset + (state.audio?.currentTime || 0)));
       saveChats();
       renderMessages();
     }
@@ -154,6 +176,7 @@
     if (state.detector) state.detector.reset();
     if (state.playbackSource) { state.playbackSource.disconnect(); state.playbackSource = null; }
     state.playbackMessage = null;
+    state.playbackOffset = 0;
     state.echoGraceUntil = 0;
     if (state.audio) {
       state.audio.pause();
@@ -350,7 +373,8 @@
     const aborter = new AbortController();
     state.aborter = aborter;
     state.utterance = { generation: state.generation, aborter, pending: new JarvisAudio.PendingTranscription(),
-                        startedAt: now(), timeline: null, screenInterrupted: !state.displayStream };
+                        startedAt: now(), nextListeningHintAt: now() + 20000,
+                        timeline: null, screenInterrupted: !state.displayStream };
     const before = state.interruptionFrame;
     state.interruptionFrame = null;
     if (before && state.displayStream && before.version === state.screenVersion && now() - before.time <= 1200) {
@@ -379,6 +403,7 @@
       method: "POST", headers: { "Content-Type": "audio/wav" }, body: wav, signal: utterance.aborter.signal
     }).then(response => response.json()).then(value => ({ text: value.text || "" }), error => ({ error }));
     utterance.pending.add(task);
+    if (state.phase === "listening") status("Listening and transcribing in the background...");
   }
 
   async function finishUtterance() {
@@ -386,8 +411,15 @@
     if (!utterance || !utterance.pending.tasks.length) return;
     const waiting = utterance.pending.collect();
     const frames = snapshotFrames(utterance);
-    setPhase("transcribing", "Putting your request together...");
-    const chunks = await waiting;
+    setPhase("transcribing", "Finishing local transcription...");
+    const slowTimer = setTimeout(() => {
+      if (state.phase === "transcribing" && state.utterance === utterance) {
+        status("Still transcribing on this computer. Close other memory-heavy apps if this is slow.");
+      }
+    }, 12000);
+    let chunks;
+    try { chunks = await waiting; }
+    finally { clearTimeout(slowTimer); }
     if (!chunks || utterance.generation !== state.generation || state.utterance !== utterance) return;
     state.utterance = null;
     const failed = chunks.find(chunk => chunk.error);
@@ -494,6 +526,10 @@
         if (state.phase === "listening" && now() >= state.echoGraceUntil) {
           if (state.echoGraceUntil) { detector.reset(); state.echoGraceUntil = 0; }
           segmenter.push(mic);
+          if (state.phase === "listening" && state.utterance && now() >= state.utterance.nextListeningHintAt) {
+            status("Still listening. If you've finished, lower microphone sensitivity or mute to send.");
+            state.utterance.nextListeningHintAt = now() + 20000;
+          }
           if (state.phase === "listening" && state.utterance && now() - state.lastTimelineProbeAt >= 800) {
             const timeline = state.utterance.timeline;
             const phase = timeline && now() - timeline.lastVoiceAt > 250 ? "after" : "during";
@@ -571,22 +607,7 @@
       .trim();
   }
 
-  async function speak(text, generation, aborter, message) {
-    state.playbackMessage = message;
-    if (state.detector) state.detector.reset();
-    setPhase("speaking", "Preparing the spoken response...");
-    let blob;
-    try {
-      const response = await request("/api/speech", {
-        method: "POST", headers: apiHeaders(), signal: aborter.signal,
-        body: JSON.stringify({ text: speechText(text).slice(0, 30000), voice: settings.voice })
-      });
-      blob = await response.blob();
-    } catch (error) {
-      if (generation === state.generation) state.playbackMessage = null;
-      throw error;
-    }
-    if (generation !== state.generation) return;
+  async function playSpeechSegment(blob) {
     const url = URL.createObjectURL(blob);
     const audio = new Audio(url);
     state.audioUrl = url;
@@ -607,21 +628,46 @@
     } finally {
       if (state.audio === audio) {
         state.audio = null;
-        state.playbackMessage = null;
         if (state.playbackSource === playbackSource && playbackSource) {
           playbackSource.disconnect();
           state.playbackSource = null;
         }
         if (finishedNormally && state.active && state.micStream) state.echoGraceUntil = now() + 450;
-        if (finishedNormally && message && message.interrupted) {
+      }
+      if (state.audioUrl === url) { URL.revokeObjectURL(url); state.audioUrl = null; }
+      if (state.finishPlayback === finishThisPlayback) state.finishPlayback = null;
+    }
+    return { finishedNormally, seconds: Number.isFinite(audio.currentTime) ? audio.currentTime : 0 };
+  }
+
+  async function speak(text, generation, aborter, message) {
+    const segments = JarvisAudio.speechSegments(speechText(text).slice(0, 30000));
+    if (!segments.length) return;
+    state.playbackMessage = message;
+    state.playbackOffset = 0;
+    if (state.detector) state.detector.reset();
+    setPhase("speaking", "Preparing the spoken response...");
+    const prepare = segment => request("/api/speech", {
+      method: "POST", headers: apiHeaders(), signal: aborter.signal,
+      body: JSON.stringify({ text: segment, voice: settings.voice })
+    }).then(response => response.blob());
+    let completed = false;
+    try {
+      completed = await JarvisAudio.playSpeechQueue(segments, {
+        prepare, play: playSpeechSegment,
+        cancelled: () => generation !== state.generation || aborter.signal.aborted,
+        onPlayed: played => { state.playbackOffset += played.seconds; }
+      });
+    } finally {
+      if (generation === state.generation) {
+        state.playbackMessage = null;
+        if (completed && message && message.interrupted) {
           delete message.interrupted;
           delete message.spoken_seconds;
           saveChats();
           renderMessages();
         }
       }
-      if (state.audioUrl === url) { URL.revokeObjectURL(url); state.audioUrl = null; }
-      if (state.finishPlayback === finishThisPlayback) state.finishPlayback = null;
     }
   }
 

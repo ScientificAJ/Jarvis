@@ -13,7 +13,7 @@ if errorlevel 1 (
   pause
   exit /b 1
 )
-"%~dp0.runtime\python\python.exe" "%~dp0jarvis_server.py"
+"%~dp0.runtime\python\python.exe" "%~dp0jarvis_server.py" %*
 if errorlevel 1 (
   echo.
   echo Jarvis stopped with an error. Please read the message above.

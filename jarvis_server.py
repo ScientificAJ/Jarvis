@@ -7,6 +7,8 @@ import binascii
 import json
 import os
 from pathlib import Path
+import select
+import socket
 import sys
 import urllib.error
 import urllib.request
@@ -18,7 +20,8 @@ ROOT = Path(__file__).resolve().parent
 # does not necessarily add the launched script's folder to sys.path.
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
-from jarvis_bark import BarkRecognizer
+from jarvis_bark import BarkRecognizer, TranscriptionCancelled
+from jarvis_credentials import delete_key
 from jarvis_startup import StartupCancelled, request_api_key
 
 STATIC = ROOT / "static"
@@ -235,6 +238,13 @@ class Handler(BaseHTTPRequestHandler):
             raise ValueError("The request is empty or too large.")
         return self.rfile.read(length)
 
+    def _client_disconnected(self) -> bool:
+        try:
+            readable, _, _ = select.select([self.connection], [], [], 0)
+            return bool(readable) and self.connection.recv(1, socket.MSG_PEEK) == b""
+        except (OSError, ValueError):
+            return True
+
     def do_GET(self):
         if not self._valid_host():
             return self._json(403, {"error": "Invalid local host."})
@@ -261,7 +271,7 @@ class Handler(BaseHTTPRequestHandler):
             if self.path == "/api/transcribe":
                 if content_type != "audio/wav":
                     raise ValueError("Expected WAV audio.")
-                text = self.server.recognizer.transcribe(raw)
+                text = self.server.recognizer.transcribe(raw, cancelled=self._client_disconnected)
                 return self._json(200, {"text": text})
             if content_type != "application/json":
                 raise ValueError("Expected a JSON request.")
@@ -295,6 +305,8 @@ class Handler(BaseHTTPRequestHandler):
                 self.wfile.write(audio)
                 return
             return self._json(404, {"error": "Not found."})
+        except TranscriptionCancelled:
+            return
         except ValueError as exc:
             self._json(400, {"error": str(exc)})
         except UpstreamError as exc:
@@ -312,7 +324,14 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Run Jarvis on this computer.")
     parser.add_argument("--port", type=int, default=int(os.environ.get("JARVIS_PORT", "47123")))
     parser.add_argument("--no-browser", action="store_true", default=os.environ.get("JARVIS_NO_BROWSER") == "1")
+    parser.add_argument("--forget-key", action="store_true", help="Remove the saved OpenRouter key and exit.")
     args = parser.parse_args()
+    if args.forget_key:
+        if delete_key():
+            print("Saved OpenRouter key removed. Jarvis will ask for a key next time.", flush=True)
+            return 0
+        print("Could not access your secure credential store. See the README for help.", flush=True)
+        return 1
     if not 1024 <= args.port <= 65535:
         print("Choose a port between 1024 and 65535.")
         return 1

@@ -114,13 +114,46 @@ function block(length, level) {
   let finished = 0;
   const segmenter = new SpeechSegmenter({ sampleRate: rate, onChunk: x => chunks.push(x), onFinish: () => finished++ });
   segmenter.push(block(12000, 0.1));
-  segmenter.push(block(1000, 0));
+  segmenter.push(block(700, 0));
   assert.equal(finished, 0);
   segmenter.push(block(4500, 0.1));
   segmenter.push(block(2000, 0));
   assert.equal(finished, 1);
-  assert.deepEqual(chunks.map(c => c.length), [15000, 2500]);
+  assert.deepEqual(chunks.map(c => c.length), [15000, 2200]);
   assert.equal(chunks[0][12000], 0, "a pause within speech should remain in the audio");
+}
+
+// A short request begins local transcription during the silence window, then
+// finishes at two seconds without waiting for a full 15-second recording.
+{
+  const chunks = [];
+  let finished = 0;
+  const segmenter = new SpeechSegmenter({ sampleRate: 1000, onChunk: x => chunks.push(x), onFinish: () => finished++ });
+  segmenter.push(block(2400, 0.1));
+  segmenter.push(block(1000, 0));
+  assert.equal(chunks.length, 1, "send the partial audio before end-of-turn detection");
+  assert.equal(chunks[0].length, 2400);
+  assert.equal(finished, 0, "do not submit the request after a one-second pause");
+  segmenter.push(block(1000, 0));
+  assert.equal(finished, 1);
+  assert.equal(chunks.length, 1, "do not send the same final audio twice");
+}
+
+// When a longer pause is followed by more speech, both parts stay in the same
+// turn, in order, and neither part of the voice is discarded or duplicated.
+{
+  const chunks = [];
+  let finished = 0;
+  const segmenter = new SpeechSegmenter({ sampleRate: 1000, onChunk: x => chunks.push(x), onFinish: () => finished++ });
+  segmenter.push(block(1400, 0.1));
+  segmenter.push(block(1200, 0));
+  segmenter.push(block(800, 0.2));
+  segmenter.push(block(2000, 0));
+  assert.equal(finished, 1);
+  assert.equal(chunks.length, 2);
+  assert.equal(chunks[0].filter(v => v > 0.05).length, 1400);
+  assert.equal(chunks[1].filter(v => v > 0.15).length, 800);
+  assert.equal(chunks[1].length, 950, "keep only a short lead-in after an early chunk");
 }
 
 // Muting mid-sentence flushes the remainder instead of losing it.

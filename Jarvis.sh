@@ -9,4 +9,4 @@ echo
 bash "$ROOT/scripts/bootstrap-unix.sh"
 OS_NAME="$(uname -s)"
 ARCH_NAME="$(uname -m)"
-exec "$ROOT/.runtime/venv-$OS_NAME-$ARCH_NAME/bin/python" "$ROOT/jarvis_server.py"
+exec "$ROOT/.runtime/venv-$OS_NAME-$ARCH_NAME/bin/python" "$ROOT/jarvis_server.py" "$@"

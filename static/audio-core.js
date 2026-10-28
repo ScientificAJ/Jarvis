@@ -1,4 +1,4 @@
-/* Segment microphone samples into consecutive 15-second WAV recordings. */
+/* Segment microphone samples into WAV recordings of at most 15 seconds. */
 (function (root) {
   "use strict";
 
@@ -7,6 +7,10 @@
       this.sampleRate = options.sampleRate;
       this.limit = Math.round(this.sampleRate * 15);
       this.silenceLimit = Math.round(this.sampleRate * (options.silenceSeconds || 2));
+      // Begin transcribing during a likely end-of-speech pause. The turn is
+      // still not submitted until the full silence limit has elapsed.
+      this.earlyLimit = Math.round(this.sampleRate * (options.earlySilenceSeconds || 1));
+      this.minEarlyAudio = Math.round(this.sampleRate * 0.4);
       this.threshold = options.threshold || 0.009;
       this.preLimit = Math.round(this.sampleRate * 0.15);
       this.onStart = options.onStart || (() => {});
@@ -22,6 +26,7 @@
       this.preCount = 0;
       this.pending = [];
       this.pendingCount = 0;
+      this.partialSentInPause = false;
       this.parts = [];
       this.count = 0;
     }
@@ -99,9 +104,24 @@
 
       if (voiced) {
         this.onVoice();
-        for (const p of this.pending) this.addPart(p);
+        if (this.partialSentInPause) {
+          // This pause already ended a chunk. Keep a short lead-in before the
+          // next speech, rather than making the model process a second of silence.
+          let keep = this.preLimit;
+          const tail = [];
+          for (let i = this.pending.length - 1; i >= 0 && keep > 0; i--) {
+            const part = this.pending[i];
+            const amount = Math.min(part.length, keep);
+            tail.unshift(part.subarray(part.length - amount));
+            keep -= amount;
+          }
+          for (const p of tail) this.addPart(p);
+        } else {
+          for (const p of this.pending) this.addPart(p);
+        }
         this.pending = [];
         this.pendingCount = 0;
+        this.partialSentInPause = false;
         this.addPart(block);
         this.flushFull();
       } else {
@@ -111,6 +131,10 @@
         this.pendingCount += block.length;
         if (this.pendingCount >= this.silenceLimit) {
           this.finish();
+        } else if (!this.partialSentInPause && this.pendingCount >= this.earlyLimit &&
+                   this.count >= this.minEarlyAudio) {
+          this.onChunk(this.take(this.count));
+          this.partialSentInPause = true;
         }
       }
     }
@@ -247,6 +271,49 @@
     }
   }
 
+  // Start speech with a short natural phrase, then prepare longer phrases
+  // while the previous audio is playing. Preserve every word in order.
+  function speechSegments(text) {
+    let remaining = String(text || "").trim();
+    const segments = [];
+    while (remaining) {
+      const limit = segments.length ? 360 : 180;
+      if (remaining.length <= limit) { segments.push(remaining); break; }
+      const window = remaining.slice(0, limit);
+      let cut = 0;
+      const endings = /[.!?](?=\s|$)/g;
+      let match;
+      while ((match = endings.exec(window))) if (match.index >= 30) cut = match.index + 1;
+      if (!cut) {
+        const lastSpace = window.search(/\s+\S*$/);
+        cut = lastSpace > 0 ? lastSpace : limit;
+      }
+      const segment = remaining.slice(0, cut).trim();
+      if (segment) segments.push(segment);
+      remaining = remaining.slice(cut).trimStart();
+    }
+    return segments;
+  }
+
+  async function playSpeechQueue(segments, { prepare, play, cancelled, onPlayed }) {
+    if (!segments.length) return true;
+    // Handle prefetch errors immediately so stopping playback does not leave an
+    // unhandled rejected promise for the next segment.
+    const safePrepare = segment => Promise.resolve().then(() => prepare(segment))
+      .then(blob => ({ blob }), error => ({ error }));
+    let pending = safePrepare(segments[0]);
+    for (let index = 0; index < segments.length; index++) {
+      const prepared = await pending;
+      if (cancelled()) return false;
+      if (prepared.error) throw prepared.error;
+      pending = index + 1 < segments.length ? safePrepare(segments[index + 1]) : null;
+      const played = await play(prepared.blob);
+      if (cancelled() || !played.finishedNormally) return false;
+      onPlayed(played);
+    }
+    return true;
+  }
+
   function wavBytes(samples, sampleRate) {
     const bytes = new ArrayBuffer(44 + samples.length * 2);
     const view = new DataView(bytes);
@@ -273,7 +340,7 @@
     return bytes;
   }
 
-  const api = { SpeechSegmenter, InterruptionDetector, PendingTranscription, wavBytes, rms };
+  const api = { SpeechSegmenter, InterruptionDetector, PendingTranscription, speechSegments, playSpeechQueue, wavBytes, rms };
   if (typeof module !== "undefined" && module.exports) module.exports = api;
   root.JarvisAudio = api;
 })(typeof globalThis !== "undefined" ? globalThis : this);

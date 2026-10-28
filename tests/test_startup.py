@@ -11,6 +11,31 @@ from jarvis_startup import StartupCancelled, request_api_key
 
 
 class StartupPromptTests(unittest.TestCase):
+    def setUp(self):
+        # Never touch a real keychain while exercising the startup dialog.
+        self.load = patch("jarvis_startup.load_key", return_value=None).start()
+        self.save = patch("jarvis_startup.save_key", return_value=True).start()
+        self.addCleanup(patch.stopall)
+
+    def test_saved_key_is_used_without_a_dialog(self):
+        self.load.return_value = "saved-secret"
+        with patch.dict("os.environ", {}, clear=True), patch("jarvis_startup.subprocess.run") as run, \
+             contextlib.redirect_stdout(io.StringIO()) as output:
+            self.assertEqual(request_api_key(), "saved-secret")
+        run.assert_not_called()
+        self.save.assert_not_called()
+        self.assertNotIn("saved-secret", output.getvalue())
+
+    def test_storage_failure_falls_back_to_session_only(self):
+        self.save.return_value = False
+        reply = subprocess.CompletedProcess([], 0, stdout="dialog-secret\n", stderr="")
+        with patch.dict("os.environ", {}, clear=True), patch("jarvis_startup.sys.platform", "win32"), \
+             patch("jarvis_startup.subprocess.run", return_value=reply), \
+             contextlib.redirect_stdout(io.StringIO()) as output:
+            self.assertEqual(request_api_key(), "dialog-secret")
+        self.assertIn("session only", output.getvalue())
+        self.assertNotIn("dialog-secret", output.getvalue())
+
     def test_existing_environment_key_needs_no_dialog(self):
         with patch.dict("os.environ", {"OPENROUTER_API_KEY": "existing-secret"}, clear=True), \
              patch("jarvis_startup.subprocess.run") as run, contextlib.redirect_stdout(io.StringIO()) as output:

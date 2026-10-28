@@ -7,8 +7,13 @@ import os
 from pathlib import Path
 import threading
 import wave
+import warnings
 
 ROOT = Path(__file__).resolve().parent
+
+
+class TranscriptionCancelled(Exception):
+    """The browser no longer needs a chunk that was waiting for the model."""
 
 
 def load_bark_without_duplicate_weights(loader, model_path, device):
@@ -54,6 +59,7 @@ class BarkRecognizer:
         self.state = "loading"
         self.detail = "Loading the local speech model. This may take a minute."
         self.device = None
+        self.quantized = False
         self._lock = threading.Lock()
         self._model = None
         self._processor = None
@@ -98,26 +104,84 @@ class BarkRecognizer:
                 self.device = "cpu"
                 model = load_bark_without_duplicate_weights(loader, model_dir / "model.bark", "cpu")
             self._model = model
+            del model
             self.detail = "Preparing and warming up local speech recognition..."
             print(self.detail, flush=True)
             self._processor = AutoProcessor.from_pretrained("nvidia/parakeet-tdt-0.6b-v3", local_files_only=True)
+            if self.device == "cpu":
+                self._prepare_cpu(torch, loader, model_dir)
             # Warm the processor and model once at startup, not on the user's
             # first spoken request. This also surfaces device errors early.
             import numpy as np
-            try:
-                self._transcribe_samples(np.zeros(8000, dtype=np.float32), 16000)
-            except Exception:
-                if requested != "auto" or self.device == "cpu":
-                    raise
-                self.detail = "Accelerator warmup failed; switching to CPU..."
-                self._model = self._model.to("cpu")
-                self.device = "cpu"
-                self._transcribe_samples(np.zeros(8000, dtype=np.float32), 16000)
-            self.state, self.detail = "ready", f"Local Bark 3.0 is ready ({self.device.upper()})."
+            def warmup_error():
+                try:
+                    self._transcribe_samples(np.zeros(8000, dtype=np.float32), 16000)
+                    return None
+                except Exception as exc:
+                    # Keep only text so a traceback cannot retain the old model
+                    # while the full-precision fallback is being loaded.
+                    return f"{type(exc).__name__}: {exc}"
+
+            error = warmup_error()
+            if error:
+                if self.device == "cpu" and self.quantized:
+                    print("Compact CPU recognition could not start; retrying in full precision...", flush=True)
+                    self._reload_cpu(loader, model_dir)
+                    self._transcribe_samples(np.zeros(8000, dtype=np.float32), 16000)
+                elif requested != "auto" or self.device == "cpu":
+                    raise RuntimeError(error)
+                else:
+                    self.detail = "Accelerator warmup failed; switching to CPU..."
+                    print(self.detail, flush=True)
+                    self._model = self._model.to("cpu")
+                    self.device = "cpu"
+                    self._prepare_cpu(torch, loader, model_dir)
+                    error = warmup_error()
+                    if error:
+                        if not self.quantized:
+                            raise RuntimeError(error)
+                        print("Compact CPU recognition could not start; retrying in full precision...", flush=True)
+                        self._reload_cpu(loader, model_dir)
+                        self._transcribe_samples(np.zeros(8000, dtype=np.float32), 16000)
+            mode = ", compact CPU" if self.quantized else ""
+            self.state, self.detail = "ready", f"Local Bark 3.0 is ready ({self.device.upper()}{mode})."
             print(self.detail, flush=True)
         except Exception as exc:
             self.state, self.detail = "error", f"Could not load Bark 3.0: {exc}"
             print(self.detail, flush=True)
+
+    def _reload_cpu(self, loader, model_dir) -> None:
+        import gc
+        self._model = None
+        self.quantized = False
+        gc.collect()
+        self._model = load_bark_without_duplicate_weights(loader, model_dir / "model.bark", "cpu")
+
+    def _prepare_cpu(self, torch, loader, model_dir) -> None:
+        """Use compact dynamic INT8 linear layers when CPU inference supports them."""
+        try:
+            requested_threads = int(os.environ.get("JARVIS_CPU_THREADS", "4"))
+        except ValueError as exc:
+            raise RuntimeError("JARVIS_CPU_THREADS must be a positive whole number.") from exc
+        if not 1 <= requested_threads <= 64:
+            raise RuntimeError("JARVIS_CPU_THREADS must be between 1 and 64.")
+        torch.set_num_threads(min(requested_threads, os.cpu_count() or 1))
+        if os.environ.get("JARVIS_CPU_QUANTIZE", "1") == "0":
+            return
+        print("Preparing compact CPU speech recognition; this can take a little longer at startup...", flush=True)
+        failed = False
+        try:
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", DeprecationWarning)
+                torch.ao.quantization.quantize_dynamic(self._model, {torch.nn.Linear}, dtype=torch.qint8, inplace=True)
+            self.quantized = True
+        except Exception:
+            failed = True
+        if failed:
+            # In-place conversion can partially modify a model before failing.
+            # Reload instead of trying to use a partially converted model.
+            print("Compact CPU mode is unavailable; loading full precision instead...", flush=True)
+            self._reload_cpu(loader, model_dir)
 
     def _transcribe_samples(self, samples, sample_rate) -> str:
         """Same preprocessing and decoding as the official loader, with a cached processor."""
@@ -135,7 +199,7 @@ class BarkRecognizer:
             output = self._model.generate(**inputs)
         return self._processor.batch_decode(output.sequences, skip_special_tokens=True)[0].strip()
 
-    def transcribe(self, wav_bytes: bytes) -> str:
+    def transcribe(self, wav_bytes: bytes, cancelled=None) -> str:
         if self.state != "ready":
             raise RuntimeError(self.detail)
         import numpy as np
@@ -154,5 +218,14 @@ class BarkRecognizer:
         except (wave.Error, EOFError) as exc:
             raise ValueError("Could not read the recorded audio.") from exc
         samples = np.frombuffer(raw, dtype="<i2").astype(np.float32) / 32768.0
-        with self._lock:
+        # The model handles one chunk at a time. If the user interrupts, don't
+        # spend time transcribing an abandoned chunk that is still in line.
+        while not self._lock.acquire(timeout=0.25):
+            if cancelled and cancelled():
+                raise TranscriptionCancelled()
+        try:
+            if cancelled and cancelled():
+                raise TranscriptionCancelled()
             return self._transcribe_samples(samples, rate)
+        finally:
+            self._lock.release()

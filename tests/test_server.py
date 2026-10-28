@@ -18,7 +18,7 @@ class FakeRecognizer:
     def load(self):
         self.state = "ready"
 
-    def transcribe(self, body):
+    def transcribe(self, body, cancelled=None):
         return "local transcript"
 
 

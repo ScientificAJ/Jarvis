@@ -11,7 +11,7 @@ $form.MinimizeBox = $false
 $form.TopMost = $true
 
 $label = New-Object System.Windows.Forms.Label
-$label.Text = 'Enter your OpenRouter API key for this session:'
+$label.Text = 'Enter your OpenRouter API key (saved securely when available):'
 $label.Location = New-Object System.Drawing.Point(18, 18)
 $label.Size = New-Object System.Drawing.Size(440, 24)
 $form.Controls.Add($label)
