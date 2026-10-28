@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>Jarvis</title>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/styles.css">
+  <script defer src="/audio-core.js"></script>
+  <script defer src="/screen-core.js"></script>
+  <script defer src="/app.js"></script>
+</head>
+<body>
+  <div class="shell">
+    <header class="topbar">
+      <div class="wordmark"><span class="mark"></span> JARVIS</div>
+      <nav aria-label="Conversation controls">
+        <button class="subtle" id="history-button" type="button">History</button>
+        <button class="subtle" id="new-button" type="button">New chat</button>
+        <button class="subtle" id="settings-button" type="button">Settings</button>
+      </nav>
+    </header>
+
+    <main>
+      <section class="welcome" aria-label="Jarvis assistant">
+        <div class="orb" id="orb" aria-hidden="true"><div></div></div>
+        <p class="eyebrow">YOUR PERSONAL ASSISTANT</p>
+        <h1>Jarvis<span>.</span></h1>
+        <p class="intro">At your service. What shall we work on?</p>
+        <p class="status" id="status" role="status" aria-live="polite">Preparing the local speech model...</p>
+      </section>
+
+      <section class="controls" aria-label="Agent controls">
+        <button class="primary" id="start-button" type="button">Start Jarvis</button>
+        <button class="control" id="mic-button" type="button" disabled aria-pressed="false">Microphone off</button>
+        <button class="control" id="screen-button" type="button" disabled aria-pressed="false">Screen off</button>
+        <button class="control" id="interrupt-button" type="button" hidden>Stop response</button>
+      </section>
+
+      <section class="screen-card" id="screen-card" hidden aria-label="Live screen preview">
+        <div class="section-heading"><span><span class="live-dot"></span> SHARED SCREEN</span><span>LIVE</span></div>
+        <video id="screen-preview" autoplay muted playsinline></video>
+        <p>Selected frames from throughout your request are sent to OpenRouter. Choose “Entire Screen” in the browser picker to share your display.</p>
+      </section>
+
+      <section class="conversation" aria-label="Current conversation">
+        <div class="section-heading"><span>CONVERSATION</span><button class="text-button" id="replay-button" type="button" hidden>Speak last answer</button></div>
+        <div id="messages" class="messages" aria-live="polite">
+          <p class="empty">Your conversation will appear here.</p>
+        </div>
+        <form id="text-form" class="composer">
+          <label class="sr-only" for="text-input">Type a message</label>
+          <textarea id="text-input" rows="1" maxlength="50000" placeholder="Speak naturally, or type a message..."></textarea>
+          <button type="submit" id="send-button" aria-label="Send message">Send <span aria-hidden="true">↗</span></button>
+        </form>
+        <p class="privacy">Speech is transcribed on this computer. Your messages and shared screen frames are sent to OpenRouter. Chats and settings stay in this browser.</p>
+      </section>
+    </main>
+  </div>
+
+  <dialog id="settings-dialog">
+    <form id="settings-form" method="dialog">
+      <div class="dialog-heading"><div><p class="eyebrow">MAKE IT YOURS</p><h2>Settings</h2></div><button class="close" value="cancel" type="button" data-close="settings-dialog" aria-label="Close settings">×</button></div>
+      <p class="hint">Your OpenRouter API key is entered at startup and used for this session. <a href="https://openrouter.ai/settings/keys" target="_blank" rel="noopener noreferrer">Get a key ↗</a></p>
+      <label for="profile">Personal preferences <span>optional</span></label>
+      <textarea id="profile" rows="4" maxlength="4000" placeholder="For example: call me Alex, explain things step by step, and keep my goals in mind."></textarea>
+      <label for="voice">Fish Audio voice ID <span>optional</span></label>
+      <input id="voice" type="text" maxlength="200" placeholder="Provider default" autocomplete="off" spellcheck="false">
+      <p class="hint">The free model may use a provider-selected voice; support for custom voice IDs can vary.</p>
+      <div class="setting-row">
+        <div><label for="sensitivity">Microphone sensitivity</label><p class="hint">Raise it if quiet speech is missed; lower it if background noise triggers listening.</p></div>
+        <select id="sensitivity"><option value="0.018">Low</option><option value="0.009">Normal</option><option value="0.004">High</option></select>
+      </div>
+      <button class="primary wide" type="submit" value="save">Save settings</button>
+    </form>
+  </dialog>
+
+  <dialog id="history-dialog">
+    <div class="dialog-heading"><div><p class="eyebrow">YOUR CONVERSATIONS</p><h2>History</h2></div><button class="close" type="button" data-close="history-dialog" aria-label="Close history">×</button></div>
+    <div id="history-list" class="history-list"></div>
+    <p class="hint">Stored only in this browser on this computer.</p>
+  </dialog>
+</body>
+</html>
