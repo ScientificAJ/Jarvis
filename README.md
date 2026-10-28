@@ -2,7 +2,7 @@
 
 Jarvis is a voice assistant inspired by J.A.R.V.I.S. from *Iron Man*. Talk to it naturally, share your screen, and hear its replies. You can interrupt it, type a message, or return to an earlier conversation.
 
-Your speech is transcribed locally using the 0.6B **Underdog Bark 3.0** model. Jarvis uses **Dots3-Note Preview** for answers and **Fish Audio S2.1 Pro Free** for speech through OpenRouter.
+Your speech is transcribed locally as you speak using a lightweight **streaming Zipformer** model. Jarvis uses **Dots3-Note Preview** for answers and **Fish Audio S2.1 Pro Free** for speech through OpenRouter.
 
 ## Quick start on Windows
 
@@ -19,7 +19,7 @@ For macOS and Linux, see [Start Jarvis](#3-start-jarvis) below. More detailed in
 
 You need:
 
-- A computer with a microphone, an internet connection, and several gigabytes of free disk space.
+- A computer with a microphone, an internet connection, and free disk space for the speech model and runtime. The model files are about 74 MB; setup also installs a small private runtime.
 - A recent browser such as Firefox, Edge, or Chrome.
 - A free OpenRouter account and API key. The next section shows you how to make one.
 
@@ -68,7 +68,7 @@ Windows setup installs a private Python runtime in the Jarvis folder; you do not
 
 4. Wait for first-time setup, enter your OpenRouter API key when prompted, and keep the terminal open until the browser opens. Jarvis uses the saved key on later starts when a secure credential store is available.
 
-The macOS launcher supports **Apple-silicon Macs**; Intel Macs are not supported by the required PyTorch version. On Linux ARM, first install Git and a current Rust toolchain so the speech decoder can be built.
+The launcher supports Intel and Apple-silicon Macs and 64-bit Linux on x64 or ARM64 processors, where compatible Python wheels are available.
 
 ## 4. Talk to Jarvis
 
@@ -81,7 +81,7 @@ Use the microphone and screen buttons to turn them on or off. Select **New chat*
 
 ## How your information is used
 
-- **Your voice:** Speech is transcribed on your computer in chunks of at most 15 seconds. During a pause, transcription can start early; the request is submitted after about two seconds of silence. Bark 3.0 recognizes English.
+- **Your voice:** Speech is transcribed continuously on your computer as you speak. The complete request is submitted after about two seconds of silence. The local model recognizes English and can make mistakes, especially with unfamiliar accents or noisy audio.
 - **Your screen:** The preview is live. When you ask something, Jarvis sends selected, time-ordered screen images to OpenRouter—not a continuous video. It can include a small amount of screen context from the previous turn. Brief changes or small text may be missed. Turning screen sharing off prevents pending or retained images from being sent; images already sent cannot be withdrawn.
 - **Your messages:** Your request, relevant conversation history, personal preferences, and selected screen images are sent to OpenRouter and its model provider. The answer is sent to OpenRouter for speech synthesis.
 - **Your key and chats:** Jarvis saves an entered key in Windows Credential Manager, macOS Keychain, or a Linux Secret Service when available, and uses it in the local server while running. It does not save the key in the project or a temporary file. Chats and personal settings are stored in your browser on your computer. A key saved by an older version of Jarvis may remain in browser storage until you save Settings again or clear the site's data.
@@ -100,9 +100,7 @@ To remove the saved key, open a terminal in the Jarvis folder and run `Jarvis.cm
 
 **There is no spoken reply.** Try **Speak last answer**. If OpenRouter reports a key or rate-limit error, check your key and try again later.
 
-**The model is slow.** Bark expands its weights in memory and may need several gigabytes of RAM. Close other memory-heavy applications and try again. The local model is loaded and warmed before the browser opens, and chunks can be transcribed while you are speaking or pausing. On some computers, transcription takes longer than the speech itself; CPU speed and available memory make a large difference.
-
-On a CPU, Jarvis normally uses a compact, lower-precision version of the same Bark model to save memory and improve speed. Transcripts can differ slightly from full precision. To prefer full precision, set the environment variable `JARVIS_CPU_QUANTIZE` to `0` before starting Jarvis; it may be much slower. If compact mode is unsupported, Jarvis falls back to full precision automatically.
+**The model is slow.** Close other memory-heavy applications and try again. The local model is loaded and warmed before the browser opens and processes speech as it arrives. Performance varies with the processor and available memory; very old computers may still struggle.
 
 **Jarvis asks for my key every time.** Check the command window for a secure-storage warning. On Linux, install `secret-tool` and make sure your desktop's Secret Service or keyring is running and unlocked. If a secure store is unavailable, Jarvis uses the key for the current session only rather than saving it in plain text.
 
@@ -112,4 +110,4 @@ On a CPU, Jarvis normally uses a compact, lower-precision version of the same Ba
 
 Jarvis is an AI assistant and can make mistakes. It can discuss the text and screen images you provide, but it does not browse the web, control your computer, or inspect files on its own. Fish Audio's provider-selected voice may not match the film character.
 
-The Bark model is downloaded from [Conway Research](https://huggingface.co/ConwayResearch/Underdog-Bark-3.0); its attribution is kept with the downloaded model.
+The English streaming model is [Zipformer, converted for Sherpa-ONNX](https://huggingface.co/csukuangfj/sherpa-onnx-streaming-zipformer-en-2023-06-26). Model files are downloaded from a pinned version and checked before use. Existing Bark model files from an earlier installation are left on disk but are no longer loaded.

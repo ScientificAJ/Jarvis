@@ -120,7 +120,7 @@
   }
 
   async function request(path, options = {}) {
-    const timeoutMs = path === "/api/transcribe" ? 180000 :
+    const timeoutMs = path.startsWith("/api/transcribe/") ? 30000 :
       path === "/api/chat" ? 90000 : path === "/api/speech" ? 60000 : 10000;
     const controller = new AbortController();
     const parent = options.signal;
@@ -139,7 +139,7 @@
       return response;
     } catch (error) {
       if (timedOut) {
-        if (path === "/api/transcribe") throw new Error("Local transcription took too long. Close other memory-heavy apps and try again.");
+        if (path.startsWith("/api/transcribe/")) throw new Error("Local transcription took too long. Close other memory-heavy apps and try again.");
         if (path === "/api/chat") throw new Error("The answer service took too long. Please try again.");
         if (path === "/api/speech") throw new Error("The speech service took too long. You can read the answer or try Speak last answer.");
         throw new Error("The local server took too long to respond.");
@@ -169,6 +169,7 @@
       renderMessages();
     }
     state.generation++;
+    if (state.utterance?.streams) for (const stream of state.utterance.streams) stream.cancel();
     if (state.aborter) state.aborter.abort();
     state.aborter = null;
     state.utterance = null;
@@ -367,14 +368,17 @@
 
   function beginUtterance() {
     if (state.utterance && state.utterance.generation === state.generation) {
+      if (!state.utterance.stream) openTranscriptionStream(state.utterance);
       status("Listening...");
       return;
     }
     const aborter = new AbortController();
     state.aborter = aborter;
     state.utterance = { generation: state.generation, aborter, pending: new JarvisAudio.PendingTranscription(),
+                        stream: null, streams: new Set(),
                         startedAt: now(), nextListeningHintAt: now() + 20000,
                         timeline: null, screenInterrupted: !state.displayStream };
+    openTranscriptionStream(state.utterance);
     const before = state.interruptionFrame;
     state.interruptionFrame = null;
     if (before && state.displayStream && before.version === state.screenVersion && now() - before.time <= 1200) {
@@ -395,20 +399,58 @@
     }
   }
 
-  function submitAudio(samples, rate) {
+  function openTranscriptionStream(utterance) {
+    const idBytes = new Uint8Array(16);
+    crypto.getRandomValues(idBytes);
+    const id = Array.from(idBytes, value => value.toString(16).padStart(2, "0")).join("");
+    const stream = new JarvisAudio.StreamingTranscription({
+      id, sampleRate: state.audioContext.sampleRate,
+      send: async (streamId, rate, sequence, bytes) => {
+        const response = await request("/api/transcribe/stream", {
+          method: "POST", signal: utterance.aborter.signal, body: bytes,
+          headers: { "Content-Type": "application/octet-stream", "X-Jarvis-Stream": streamId,
+                     "X-Jarvis-Sample-Rate": String(rate), "X-Jarvis-Sequence": String(sequence) }
+        });
+        return response.json();
+      },
+      finalize: async (streamId, sequence) => {
+        const response = await request("/api/transcribe/finish", {
+          method: "POST", signal: utterance.aborter.signal, headers: apiHeaders(),
+          body: JSON.stringify({ stream: streamId, sequence })
+        });
+        return response.json();
+      },
+      cancel: streamId => fetch("/api/transcribe/cancel", {
+        method: "POST", headers: apiHeaders(), body: JSON.stringify({ stream: streamId }), keepalive: true
+      }).catch(() => {}),
+      onPartial: text => {
+        if (state.utterance === utterance && state.phase === "listening" && text.trim()) {
+          status("Listening: " + text.trim().slice(-150));
+        }
+      },
+      onError: error => {
+        if (state.utterance === utterance && error.name !== "AbortError") {
+          status(`Transcription failed: ${error.message}`, true);
+        }
+      }
+    });
+    utterance.stream = stream;
+    utterance.streams.add(stream);
+  }
+
+  function submitAudio(samples) {
     const utterance = state.utterance;
-    if (!utterance) return;
-    const wav = JarvisAudio.wavBytes(samples, rate);
-    const task = request("/api/transcribe", {
-      method: "POST", headers: { "Content-Type": "audio/wav" }, body: wav, signal: utterance.aborter.signal
-    }).then(response => response.json()).then(value => ({ text: value.text || "" }), error => ({ error }));
-    utterance.pending.add(task);
-    if (state.phase === "listening") status("Listening and transcribing in the background...");
+    if (utterance?.stream) utterance.stream.push(samples);
   }
 
   async function finishUtterance() {
     const utterance = state.utterance;
-    if (!utterance || !utterance.pending.tasks.length) return;
+    if (!utterance || !utterance.stream) return;
+    const stream = utterance.stream;
+    utterance.stream = null;
+    const task = stream.finish();
+    utterance.pending.add(task);
+    task.then(() => utterance.streams.delete(stream));
     const waiting = utterance.pending.collect();
     const frames = snapshotFrames(utterance);
     setPhase("transcribing", "Finishing local transcription...");
@@ -502,7 +544,7 @@
         threshold: Number(settings.sensitivity) || 0.009,
         onStart: beginUtterance,
         onVoice: noteVoice,
-        onChunk: samples => submitAudio(samples, context.sampleRate),
+        onAudio: samples => submitAudio(samples),
         onFinish: finishUtterance
       });
       const detector = new JarvisAudio.InterruptionDetector({

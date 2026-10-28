@@ -1,21 +1,17 @@
-/* Segment microphone samples into WAV recordings of at most 15 seconds. */
+/* Detect speech and feed its audio to the local streaming recognizer. */
 (function (root) {
   "use strict";
 
   class SpeechSegmenter {
     constructor(options) {
       this.sampleRate = options.sampleRate;
-      this.limit = Math.round(this.sampleRate * 15);
+      this.limit = Math.round(this.sampleRate * 0.25);
       this.silenceLimit = Math.round(this.sampleRate * (options.silenceSeconds || 2));
-      // Begin transcribing during a likely end-of-speech pause. The turn is
-      // still not submitted until the full silence limit has elapsed.
-      this.earlyLimit = Math.round(this.sampleRate * (options.earlySilenceSeconds || 1));
-      this.minEarlyAudio = Math.round(this.sampleRate * 0.4);
       this.threshold = options.threshold || 0.009;
       this.preLimit = Math.round(this.sampleRate * 0.15);
       this.onStart = options.onStart || (() => {});
       this.onVoice = options.onVoice || (() => {});
-      this.onChunk = options.onChunk;
+      this.onAudio = options.onAudio;
       this.onFinish = options.onFinish;
       this.reset();
     }
@@ -24,9 +20,7 @@
       this.speaking = false;
       this.pre = [];
       this.preCount = 0;
-      this.pending = [];
-      this.pendingCount = 0;
-      this.partialSentInPause = false;
+      this.silentCount = 0;
       this.parts = [];
       this.count = 0;
     }
@@ -54,7 +48,7 @@
     }
 
     flushFull() {
-      while (this.count >= this.limit) this.onChunk(this.take(this.limit));
+      while (this.count >= this.limit) this.onAudio(this.take(this.limit));
     }
 
     remember(block) {
@@ -75,7 +69,7 @@
 
     finish() {
       if (!this.speaking) return;
-      if (this.count) this.onChunk(this.take(this.count));
+      if (this.count) this.onAudio(this.take(this.count));
       this.reset();
       this.onFinish();
     }
@@ -102,40 +96,12 @@
         return;
       }
 
-      if (voiced) {
-        this.onVoice();
-        if (this.partialSentInPause) {
-          // This pause already ended a chunk. Keep a short lead-in before the
-          // next speech, rather than making the model process a second of silence.
-          let keep = this.preLimit;
-          const tail = [];
-          for (let i = this.pending.length - 1; i >= 0 && keep > 0; i--) {
-            const part = this.pending[i];
-            const amount = Math.min(part.length, keep);
-            tail.unshift(part.subarray(part.length - amount));
-            keep -= amount;
-          }
-          for (const p of tail) this.addPart(p);
-        } else {
-          for (const p of this.pending) this.addPart(p);
-        }
-        this.pending = [];
-        this.pendingCount = 0;
-        this.partialSentInPause = false;
-        this.addPart(block);
-        this.flushFull();
-      } else {
-        // Hold silence until speech resumes. At the end it is discarded so a
-        // two-second detection delay does not create an extra silent chunk.
-        this.pending.push(block);
-        this.pendingCount += block.length;
-        if (this.pendingCount >= this.silenceLimit) {
-          this.finish();
-        } else if (!this.partialSentInPause && this.pendingCount >= this.earlyLimit &&
-                   this.count >= this.minEarlyAudio) {
-          this.onChunk(this.take(this.count));
-          this.partialSentInPause = true;
-        }
+      this.addPart(block);
+      this.flushFull();
+      if (voiced) { this.onVoice(); this.silentCount = 0; }
+      else {
+        this.silentCount += block.length;
+        if (this.silentCount >= this.silenceLimit) this.finish();
       }
     }
   }
@@ -258,8 +224,87 @@
     }
   }
 
-  // Reuse already queued 15-second transcriptions if the user starts speaking
-  // again while the final chunk is still being processed.
+  // Send ordered microphone packets as they are captured. Each utterance has
+  // its own stateful server-side decoder, not independent batch transcripts.
+  class StreamingTranscription {
+    constructor(options) {
+      this.id = options.id;
+      this.rate = options.sampleRate;
+      this.send = options.send;
+      this.finalize = options.finalize;
+      this.cancelRemote = options.cancel;
+      this.onPartial = options.onPartial || (() => {});
+      this.onError = options.onError || (() => {});
+      this.tail = Promise.resolve();
+      this.sequence = 0;
+      this.pendingSamples = 0;
+      this.error = null;
+      this.closed = false;
+      this.cancelled = false;
+      this.done = false;
+      this.remoteCancelled = false;
+      this.finishPromise = null;
+    }
+
+    forgetRemote() {
+      if (this.remoteCancelled) return;
+      this.remoteCancelled = true;
+      try { Promise.resolve(this.cancelRemote(this.id)).catch(() => {}); } catch (_) {}
+    }
+
+    push(samples) {
+      if (this.closed || this.error || !samples.length) return;
+      if (this.pendingSamples + samples.length > this.rate * 30) {
+        this.error = new Error("Speech recognition cannot keep up. Try closing other applications.");
+        this.onError(this.error);
+        this.forgetRemote();
+        return;
+      }
+      const bytes = pcm16Bytes(samples);
+      const sequence = this.sequence++;
+      this.pendingSamples += samples.length;
+      this.tail = this.tail.then(async () => {
+        if (this.cancelled || this.error) return;
+        const value = await this.send(this.id, this.rate, sequence, bytes);
+        if (!this.cancelled && value && typeof value.text === "string") this.onPartial(value.text);
+      }).catch(error => {
+        if (!this.cancelled && !this.error) { this.error = error; this.onError(error); }
+      }).finally(() => { this.pendingSamples -= samples.length; });
+    }
+
+    finish() {
+      if (this.finishPromise) return this.finishPromise;
+      this.closed = true;
+      this.finishPromise = this.tail.then(async () => {
+        if (this.cancelled) {
+          const error = new Error("Transcription cancelled.");
+          error.name = "AbortError";
+          return { error };
+        }
+        if (this.error) { this.forgetRemote(); return { error: this.error }; }
+        if (!this.sequence) return { text: "" };
+        try {
+          const result = await this.finalize(this.id, this.sequence);
+          this.done = true;
+          return { text: typeof result.text === "string" ? result.text : "" };
+        } catch (error) {
+          this.forgetRemote();
+          return { error };
+        }
+      });
+      return this.finishPromise;
+    }
+
+    cancel() {
+      if (this.cancelled || this.done) return;
+      this.cancelled = true;
+      this.closed = true;
+      this.forgetRemote();
+    }
+  }
+
+  // Keep completed streaming segments if the user resumes while the final
+  // transcript is being assembled.
   class PendingTranscription {
     constructor() { this.tasks = []; this.revision = 0; }
     add(task) { this.tasks.push(task); }
@@ -269,6 +314,16 @@
       const results = await Promise.all(this.tasks.slice());
       return revision === this.revision ? results : null;
     }
+  }
+
+  function pcm16Bytes(samples) {
+    const bytes = new ArrayBuffer(samples.length * 2);
+    const view = new DataView(bytes);
+    for (let i = 0; i < samples.length; i++) {
+      const value = Math.max(-1, Math.min(1, samples[i]));
+      view.setInt16(i * 2, value < 0 ? value * 32768 : value * 32767, true);
+    }
+    return bytes;
   }
 
   // Start speech with a short natural phrase, then prepare longer phrases
@@ -314,33 +369,8 @@
     return true;
   }
 
-  function wavBytes(samples, sampleRate) {
-    const bytes = new ArrayBuffer(44 + samples.length * 2);
-    const view = new DataView(bytes);
-    function ascii(offset, value) {
-      for (let i = 0; i < value.length; i++) view.setUint8(offset + i, value.charCodeAt(i));
-    }
-    ascii(0, "RIFF");
-    view.setUint32(4, 36 + samples.length * 2, true);
-    ascii(8, "WAVE");
-    ascii(12, "fmt ");
-    view.setUint32(16, 16, true);
-    view.setUint16(20, 1, true);
-    view.setUint16(22, 1, true);
-    view.setUint32(24, sampleRate, true);
-    view.setUint32(28, sampleRate * 2, true);
-    view.setUint16(32, 2, true);
-    view.setUint16(34, 16, true);
-    ascii(36, "data");
-    view.setUint32(40, samples.length * 2, true);
-    for (let i = 0; i < samples.length; i++) {
-      const value = Math.max(-1, Math.min(1, samples[i]));
-      view.setInt16(44 + i * 2, value < 0 ? value * 32768 : value * 32767, true);
-    }
-    return bytes;
-  }
-
-  const api = { SpeechSegmenter, InterruptionDetector, PendingTranscription, speechSegments, playSpeechQueue, wavBytes, rms };
+  const api = { SpeechSegmenter, InterruptionDetector, StreamingTranscription, PendingTranscription,
+    pcm16Bytes, speechSegments, playSpeechQueue, rms };
   if (typeof module !== "undefined" && module.exports) module.exports = api;
   root.JarvisAudio = api;
 })(typeof globalThis !== "undefined" ? globalThis : this);

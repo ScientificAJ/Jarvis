@@ -18,8 +18,14 @@ class FakeRecognizer:
     def load(self):
         self.state = "ready"
 
-    def transcribe(self, body, cancelled=None):
+    def accept(self, stream_id, rate, sequence, body):
         return "local transcript"
+
+    def finish(self, stream_id, sequence):
+        return "local transcript"
+
+    def cancel(self, stream_id):
+        pass
 
 
 class ServerTests(unittest.TestCase):
@@ -43,22 +49,30 @@ class ServerTests(unittest.TestCase):
         self.server.server_close()
         self.thread.join()
 
-    def post(self, path, body, content_type="application/json", origin=None, key="test-key"):
+    def post(self, path, body, content_type="application/json", origin=None, key="test-key", headers=None):
         connection = http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
         if not isinstance(body, bytes):
             body = json.dumps(body).encode()
-        connection.request("POST", path, body, {
+        request_headers = {
             "Content-Type": content_type,
             "Origin": self.origin if origin is None else origin,
             "X-OpenRouter-Key": key,
-        })
+        }
+        request_headers.update(headers or {})
+        connection.request("POST", path, body, request_headers)
         result = connection.getresponse()
         data = result.read()
         connection.close()
         return result.status, data
 
     def test_complete_voice_and_vision_request_contract(self):
-        status, body = self.post("/api/transcribe", b"local audio", content_type="audio/wav")
+        stream_id = "a" * 32
+        status, body = self.post("/api/transcribe/stream", b"\x00\x00", content_type="application/octet-stream",
+                                 headers={"X-Jarvis-Stream": stream_id, "X-Jarvis-Sample-Rate": "16000",
+                                          "X-Jarvis-Sequence": "0"})
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)["text"], "local transcript")
+        status, body = self.post("/api/transcribe/finish", {"stream": stream_id, "sequence": 1})
         self.assertEqual(status, 200)
         self.assertEqual(json.loads(body)["text"], "local transcript")
         screen = "data:image/jpeg;base64," + base64.b64encode(b"jpeg data").decode()
@@ -83,6 +97,10 @@ class ServerTests(unittest.TestCase):
 
     def test_cross_origin_requests_are_rejected(self):
         status, body = self.post("/api/chat", {"text": "hello"}, origin="https://example.com")
+        self.assertEqual(status, 403)
+        status, _ = self.post("/api/transcribe/stream", b"\x00\x00", content_type="application/octet-stream",
+                              origin="https://example.com", headers={"X-Jarvis-Stream": "a" * 32,
+                              "X-Jarvis-Sample-Rate": "16000", "X-Jarvis-Sequence": "0"})
         self.assertEqual(status, 403)
         self.assertEqual(self.calls, [])
 
@@ -157,7 +175,7 @@ class ServerTests(unittest.TestCase):
                 self.state = "ready"
 
         with patch("jarvis_server.JarvisHTTPServer", StubServer), \
-             patch("jarvis_server.BarkRecognizer", StartupRecognizer), \
+             patch("jarvis_server.StreamingRecognizer", StartupRecognizer), \
              patch("jarvis_server.request_api_key", side_effect=lambda: events.append("key") or "test-key"), \
              patch("jarvis_server.webbrowser.open", side_effect=lambda url: events.append("browser") or True) as open_browser, \
              patch("sys.argv", ["jarvis_server.py", "--port", "47123"]), \
@@ -179,7 +197,7 @@ class ServerTests(unittest.TestCase):
                 self.detail = "Model load failed."
 
         with patch("jarvis_server.JarvisHTTPServer", StubServer), \
-             patch("jarvis_server.BarkRecognizer", FailedRecognizer), \
+             patch("jarvis_server.StreamingRecognizer", FailedRecognizer), \
              patch("jarvis_server.request_api_key", return_value="test-key"), \
              patch("jarvis_server.webbrowser.open") as open_browser, \
              patch("sys.argv", ["jarvis_server.py", "--port", "47123"]), \

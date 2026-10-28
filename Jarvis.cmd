@@ -13,7 +13,9 @@ if errorlevel 1 (
   pause
   exit /b 1
 )
-"%~dp0.runtime\python\python.exe" "%~dp0jarvis_server.py" %*
+set "JARVIS_PYTHON=%~dp0.runtime\python\python.exe"
+for /f "usebackq delims=" %%A in ("%~dp0.runtime\python-arch.txt") do if /i "%%A"=="arm64" set "JARVIS_PYTHON=%~dp0.runtime\python-arm64\python.exe"
+"%JARVIS_PYTHON%" "%~dp0jarvis_server.py" %*
 if errorlevel 1 (
   echo.
   echo Jarvis stopped with an error. Please read the message above.

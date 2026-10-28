@@ -7,8 +7,6 @@ import binascii
 import json
 import os
 from pathlib import Path
-import select
-import socket
 import sys
 import urllib.error
 import urllib.request
@@ -20,7 +18,7 @@ ROOT = Path(__file__).resolve().parent
 # does not necessarily add the launched script's folder to sys.path.
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
-from jarvis_bark import BarkRecognizer, TranscriptionCancelled
+from jarvis_streaming import StreamingRecognizer
 from jarvis_credentials import delete_key
 from jarvis_startup import StartupCancelled, request_api_key
 
@@ -238,13 +236,6 @@ class Handler(BaseHTTPRequestHandler):
             raise ValueError("The request is empty or too large.")
         return self.rfile.read(length)
 
-    def _client_disconnected(self) -> bool:
-        try:
-            readable, _, _ = select.select([self.connection], [], [], 0)
-            return bool(readable) and self.connection.recv(1, socket.MSG_PEEK) == b""
-        except (OSError, ValueError):
-            return True
-
     def do_GET(self):
         if not self._valid_host():
             return self._json(403, {"error": "Invalid local host."})
@@ -268,10 +259,15 @@ class Handler(BaseHTTPRequestHandler):
         try:
             raw = self._body()
             content_type = self.headers.get_content_type()
-            if self.path == "/api/transcribe":
-                if content_type != "audio/wav":
-                    raise ValueError("Expected WAV audio.")
-                text = self.server.recognizer.transcribe(raw, cancelled=self._client_disconnected)
+            if self.path == "/api/transcribe/stream":
+                if content_type != "application/octet-stream":
+                    raise ValueError("Expected microphone audio.")
+                try:
+                    rate = int(self.headers.get("X-Jarvis-Sample-Rate", ""))
+                    sequence = int(self.headers.get("X-Jarvis-Sequence", ""))
+                except ValueError as exc:
+                    raise ValueError("Invalid audio packet details.") from exc
+                text = self.server.recognizer.accept(self.headers.get("X-Jarvis-Stream", ""), rate, sequence, raw)
                 return self._json(200, {"text": text})
             if content_type != "application/json":
                 raise ValueError("Expected a JSON request.")
@@ -281,6 +277,12 @@ class Handler(BaseHTTPRequestHandler):
                 raise ValueError("Invalid JSON request.") from exc
             if not isinstance(data, dict):
                 raise ValueError("Invalid request.")
+            if self.path == "/api/transcribe/finish":
+                text = self.server.recognizer.finish(data.get("stream"), data.get("sequence"))
+                return self._json(200, {"text": text})
+            if self.path == "/api/transcribe/cancel":
+                self.server.recognizer.cancel(data.get("stream"))
+                return self._json(200, {"cancelled": True})
             key = os.environ.get("OPENROUTER_API_KEY", "").strip() or self.headers.get("X-OpenRouter-Key", "").strip()
             if not key or "\n" in key or "\r" in key:
                 raise ValueError("Add your OpenRouter API key in Settings first.")
@@ -305,8 +307,6 @@ class Handler(BaseHTTPRequestHandler):
                 self.wfile.write(audio)
                 return
             return self._json(404, {"error": "Not found."})
-        except TranscriptionCancelled:
-            return
         except ValueError as exc:
             self._json(400, {"error": str(exc)})
         except UpstreamError as exc:
@@ -336,7 +336,7 @@ def main() -> int:
         print("Choose a port between 1024 and 65535.")
         return 1
     url = f"http://127.0.0.1:{args.port}/"
-    recognizer = BarkRecognizer()
+    recognizer = StreamingRecognizer()
     try:
         server = JarvisHTTPServer(("127.0.0.1", args.port), recognizer)
     except OSError as exc:
