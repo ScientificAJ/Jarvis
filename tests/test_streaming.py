@@ -1,13 +1,16 @@
 from pathlib import Path
 import struct
 import sys
+import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from jarvis_streaming import StreamingRecognizer
+import jarvis_streaming
+from jarvis_streaming import BPE_VOCAB, HOTWORDS, StreamingRecognizer, parse_hotwords
 
 
 class FakeStream:
@@ -106,6 +109,77 @@ class StreamingRecognizerTests(unittest.TestCase):
             with self.subTest(stream_id=stream_id, rate=rate, seq=seq):
                 with self.assertRaises(ValueError):
                     self.recognizer.accept(stream_id, rate, seq, pcm)
+
+
+class HotwordTests(unittest.TestCase):
+    def test_decoder_receives_hints_and_can_fall_back_to_general_decoding(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            (root / ".runtime").mkdir()
+            model = root / "model"
+            model.mkdir()
+            for name in (jarvis_streaming.ENCODER, jarvis_streaming.DECODER,
+                         jarvis_streaming.JOINER, jarvis_streaming.TOKENS):
+                (model / name).touch()
+            hotwords = root / "words.txt"
+            hotwords.write_text("# comment\n phishing \nS Q L injection\n", encoding="utf-8")
+            vocab = root / "vocab.txt"
+            vocab.touch()
+
+            for enabled in (True, False):
+                with self.subTest(enabled=enabled):
+                    seen = {}
+
+                    def create_model(**options):
+                        seen.update(options)
+                        if "hotwords_file" in options:
+                            seen["file_contents"] = Path(options["hotwords_file"]).read_text(encoding="utf-8")
+                        return FakeModel()
+
+                    sherpa = SimpleNamespace(OnlineRecognizer=SimpleNamespace(from_transducer=create_model))
+                    with patch.dict(sys.modules, {"sherpa_onnx": sherpa}), \
+                         patch.dict("os.environ", {"JARVIS_CYBER_HOTWORDS": "1" if enabled else "0"}), \
+                         patch.object(jarvis_streaming, "ROOT", root), \
+                         patch.object(jarvis_streaming, "MODEL_DIR", model), \
+                         patch.object(jarvis_streaming, "HOTWORDS", hotwords), \
+                         patch.object(jarvis_streaming, "BPE_VOCAB", vocab):
+                        recognizer = StreamingRecognizer()
+                        recognizer.load()
+
+                    self.assertEqual(recognizer.state, "ready", recognizer.detail)
+                    if enabled:
+                        self.assertEqual(seen["decoding_method"], "modified_beam_search")
+                        self.assertEqual(seen["modeling_unit"], "bpe")
+                        self.assertEqual(seen["file_contents"], "PHISHING\nS Q L INJECTION\n")
+                        self.assertFalse(Path(seen["hotwords_file"]).exists())
+                    else:
+                        self.assertEqual(seen["decoding_method"], "greedy_search")
+                        self.assertNotIn("hotwords_file", seen)
+
+    def test_comments_duplicates_and_case_are_handled(self):
+        self.assertEqual(parse_hotwords("# threats\n phishing \nPhishing\nS Q L injection\n"),
+                         ["PHISHING", "S Q L INJECTION"])
+
+    def test_unsupported_characters_are_rejected_before_loading_native_code(self):
+        for entry in ("CVE-2026", "DNS/HTTPS", "a" * 121):
+            with self.subTest(entry=entry):
+                with self.assertRaisesRegex(ValueError, "line 1"):
+                    parse_hotwords(entry)
+
+    def test_hotword_count_is_bounded(self):
+        # Use distinct, valid short phrases to exercise the count bound.
+        terms = (f"TERM {chr(65 + n // (26 * 26))}{chr(65 + (n // 26) % 26)}{chr(65 + n % 26)}"
+                 for n in range(2001))
+        with self.assertRaisesRegex(ValueError, "2,000"):
+            parse_hotwords("\n".join(terms))
+
+    def test_packaged_vocabulary_contains_representative_terms(self):
+        terms = parse_hotwords(HOTWORDS.read_text(encoding="utf-8"))
+        self.assertGreater(len(terms), 650)
+        self.assertEqual(len(terms), len(set(terms)))
+        for term in ("PHISHING", "RANSOMWARE", "CROSS SITE SCRIPTING", "S Q L INJECTION", "C V E"):
+            self.assertIn(term, terms)
+        self.assertGreater(len(BPE_VOCAB.read_text(encoding="utf-8").splitlines()), 400)
 
 
 if __name__ == "__main__":

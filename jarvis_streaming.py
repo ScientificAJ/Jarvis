@@ -6,6 +6,7 @@ from pathlib import Path
 import re
 import threading
 import time
+import uuid
 
 ROOT = Path(__file__).resolve().parent
 MODEL_DIR = ROOT / ".runtime" / "streaming-model"
@@ -13,6 +14,27 @@ ENCODER = "encoder-epoch-99-avg-1-chunk-16-left-128.int8.onnx"
 DECODER = "decoder-epoch-99-avg-1-chunk-16-left-128.onnx"
 JOINER = "joiner-epoch-99-avg-1-chunk-16-left-128.int8.onnx"
 TOKENS = "tokens.txt"
+HOTWORDS = ROOT / "resources" / "cybersecurity_hotwords.txt"
+BPE_VOCAB = ROOT / "resources" / "zipformer-bpe.vocab"
+HOTWORD_SCORE = 0.8
+
+
+def parse_hotwords(text):
+    """Validate editable spoken phrases before handing them to the decoder."""
+    words = []
+    seen = set()
+    for number, raw in enumerate(text.splitlines(), 1):
+        if not raw.strip() or raw.lstrip().startswith("#"):
+            continue
+        phrase = " ".join(raw.split()).upper()
+        if len(phrase) > 120 or not re.fullmatch(r"[A-Z]+(?: [A-Z]+)*", phrase):
+            raise ValueError(f"Cybersecurity vocabulary line {number} must contain English letters and spaces only.")
+        if phrase not in seen:
+            words.append(phrase)
+            seen.add(phrase)
+        if len(words) > 2000:
+            raise ValueError("The cybersecurity vocabulary may contain at most 2,000 phrases.")
+    return words
 
 
 class _Session:
@@ -54,10 +76,32 @@ class StreamingRecognizer:
             if not 1 <= threads <= 16:
                 raise RuntimeError("JARVIS_CPU_THREADS must be between 1 and 16.")
             print("Loading the lightweight local streaming speech model...", flush=True)
-            self._model = sherpa_onnx.OnlineRecognizer.from_transducer(
-                tokens=str(paths[3]), encoder=str(paths[0]), decoder=str(paths[1]), joiner=str(paths[2]),
-                num_threads=min(threads, os.cpu_count() or 1), sample_rate=16000, feature_dim=80,
-                enable_endpoint_detection=False, decoding_method="greedy_search", provider="cpu")
+            options = dict(tokens=str(paths[3]), encoder=str(paths[0]), decoder=str(paths[1]), joiner=str(paths[2]),
+                           num_threads=min(threads, os.cpu_count() or 1), sample_rate=16000, feature_dim=80,
+                           enable_endpoint_detection=False, provider="cpu")
+            phrases = []
+            if os.environ.get("JARVIS_CYBER_HOTWORDS", "1") != "0":
+                if not HOTWORDS.is_file() or not BPE_VOCAB.is_file():
+                    raise RuntimeError("The cybersecurity vocabulary is missing. Restore the resources folder and restart Jarvis.")
+                phrases = parse_hotwords(HOTWORDS.read_text(encoding="utf-8"))
+            if phrases:
+                # Sherpa reads the file during construction. A separate file per
+                # startup avoids races between concurrent local instances.
+                active_file = ROOT / ".runtime" / f"cyber-hotwords-{uuid.uuid4().hex}.txt"
+                try:
+                    active_file.write_text("\n".join(phrases) + "\n", encoding="utf-8")
+                    self._model = sherpa_onnx.OnlineRecognizer.from_transducer(
+                        **options, decoding_method="modified_beam_search", max_active_paths=4,
+                        hotwords_score=HOTWORD_SCORE, hotwords_file=str(active_file),
+                        modeling_unit="bpe", bpe_vocab=str(BPE_VOCAB))
+                finally:
+                    try:
+                        active_file.unlink(missing_ok=True)
+                    except OSError:
+                        pass
+                print(f"Loaded {len(phrases)} cybersecurity speech hints.", flush=True)
+            else:
+                self._model = sherpa_onnx.OnlineRecognizer.from_transducer(**options, decoding_method="greedy_search")
             self._np = np
             warm = self._model.create_stream()
             warm.accept_waveform(16000, np.zeros(16000, dtype=np.float32))

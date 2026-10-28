@@ -84,6 +84,8 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(json.loads(body)["text"], "At your service.")
         path, payload, key = self.calls[-1]
         self.assertEqual((path, key, payload["model"]), ("/chat/completions", "test-key", CHAT_MODEL))
+        self.assertIn("misheard, missing, repeated", payload["messages"][0]["content"])
+        self.assertIn("commands, flags, code, IP addresses", payload["messages"][0]["content"])
         self.assertEqual(payload["reasoning"], {"enabled": True, "exclude": True})
         self.assertEqual(payload["messages"][-1]["content"][0]["text"], "What is this?")
         self.assertEqual(payload["messages"][-1]["content"][-1]["image_url"]["url"], screen)

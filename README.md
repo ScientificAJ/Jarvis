@@ -79,6 +79,8 @@ The launcher supports Intel and Apple-silicon Macs and 64-bit Linux on x64 or AR
 
 Use the microphone and screen buttons to turn them on or off. Select **New chat** to start again or **History** to open a previous conversation. You can also type in the message box. Close the command or terminal window to stop Jarvis.
 
+Jarvis uses a broad [cybersecurity vocabulary](resources/cybersecurity_hotwords.txt) as a local speech-recognition hint, and uses conversation and screen context to interpret likely transcription mistakes. You can edit the vocabulary and restart Jarvis to add terms. Hints can improve recognition but cannot guarantee every term is heard correctly; see [the vocabulary guide](resources/README.md) for details and how to turn hints off.
+
 ## How your information is used
 
 - **Your voice:** Speech is transcribed continuously on your computer as you speak. The complete request is submitted after about two seconds of silence. The local model recognizes English and can make mistakes, especially with unfamiliar accents or noisy audio.
